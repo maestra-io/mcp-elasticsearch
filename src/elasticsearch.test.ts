@@ -89,29 +89,35 @@ describe("ElasticsearchClient", () => {
       const expected = { hits: { total: { value: 1 }, hits: [{ _source: { msg: "hello" } }] } };
       mockFetchOk(expected);
 
-      const result = await client.search("my-index", { match: { msg: "hello" } }, 10, 0);
+      const result = await client.search("my-index", { query: { match: { msg: "hello" } }, size: 10 });
       expect(result).toEqual(expected);
       expect(fetchMock.mock.calls[0][0]).toContain("/my-index/_search");
-      expect(fetchMock.mock.calls[0][0]).toContain("size=10");
-      expect(fetchMock.mock.calls[0][0]).toContain("from=0");
     });
 
     it("sends search request without index", async () => {
       mockFetchOk({ hits: { total: { value: 0 }, hits: [] } });
 
-      await client.search(undefined, { match_all: {} }, 5, 0);
-      expect(fetchMock.mock.calls[0][0]).toContain("/_search?size=5&from=0");
+      await client.search(undefined, { query: { match_all: {} }, size: 5 });
+      expect(fetchMock.mock.calls[0][0]).toContain("/_search");
       expect(fetchMock.mock.calls[0][0]).not.toContain("/undefined/");
     });
 
-    it("includes sort and _source in body", async () => {
-      mockFetchOk({ hits: { total: { value: 0 }, hits: [] } });
+    it("passes full body including aggs, sort, _source", async () => {
+      mockFetchOk({ hits: { total: { value: 0 }, hits: [] }, aggregations: { status: { buckets: [] } } });
 
-      await client.search("idx", { match_all: {} }, 10, 0, [{ "@timestamp": "desc" }], ["field1"]);
+      await client.search("idx", {
+        query: { match_all: {} },
+        size: 0,
+        sort: [{ "@timestamp": "desc" }],
+        _source: ["field1"],
+        aggs: { status: { terms: { field: "status" } } },
+      });
 
       const body = JSON.parse(fetchMock.mock.calls[0][1].body);
       expect(body.sort).toEqual([{ "@timestamp": "desc" }]);
       expect(body._source).toEqual(["field1"]);
+      expect(body.aggs).toEqual({ status: { terms: { field: "status" } } });
+      expect(body.size).toBe(0);
     });
   });
 

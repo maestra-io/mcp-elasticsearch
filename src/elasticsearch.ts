@@ -97,13 +97,8 @@ export class ElasticsearchClient {
     return this.request("GET", "/_cat/indices?format=json");
   }
 
-  async search(index: string | undefined, query: unknown, size: number, from: number, sort?: unknown, source?: unknown): Promise<unknown> {
-    const body: Record<string, unknown> = {};
-    if (query !== undefined) body.query = query;
-    if (sort !== undefined) body.sort = sort;
-    if (source !== undefined) body._source = source;
-
-    const path = index ? `/${encodeURIComponent(index)}/_search?size=${size}&from=${from}` : `/_search?size=${size}&from=${from}`;
+  async search(index: string | undefined, body: Record<string, unknown>): Promise<unknown> {
+    const path = index ? `/${encodeURIComponent(index)}/_search` : `/_search`;
     return this.request("POST", path, body);
   }
 }
