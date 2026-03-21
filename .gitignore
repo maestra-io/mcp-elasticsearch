@@ -1,13 +1,8 @@
-# Executable files
-mcp-elasticsearch
-mcp-elasticsearch.exe
-main
-main.exe
+# Build output
+dist/
 
-# Go build artifacts
-*.out
-*.test
-*.prof
+# Dependencies
+node_modules/
 
 # IDE and editor files
 .vscode/
@@ -28,9 +23,18 @@ Thumbs.db
 .env.local
 .env.production
 
-# Dependencies
-vendor/
+# Test coverage
+coverage/
 
-# Test coverage files
+# Go artifacts (legacy)
+mcp-elasticsearch
+mcp-elasticsearch.exe
+mcp-elasticsearch-linux
+main
+main.exe
+*.out
+*.test
+*.prof
+vendor/
 coverage.out
-coverage.html mcp-elasticsearch-linux
+coverage.html
