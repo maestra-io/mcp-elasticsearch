@@ -62,25 +62,19 @@ export function registerTools(server: McpServer, esClient: ElasticsearchClient):
 
   server.tool(
     "es_search",
-    `Execute an Elasticsearch search query using Query DSL.
-Supports full Query DSL (match, bool, range, term, etc.), pagination, sorting, and source filtering.
+    `Execute an Elasticsearch search query using the full Search API body.
+Pass the complete request body as you would to POST /<index>/_search.
+Supports query, aggs, size, from, sort, _source, highlight, track_total_hits, and all other Search API parameters.
 The index parameter is optional — omit it to search across all indices.`,
     {
-      index: z.string().optional().describe("Index name to search (optional, searches all if omitted)"),
-      query: z.record(z.unknown()).optional().describe("Elasticsearch Query DSL object (e.g. {\"match\": {\"message\": \"error\"}}). Defaults to match_all"),
-      size: z.number().min(0).max(10000).default(10).describe("Number of results to return (default: 10)"),
-      from: z.number().min(0).default(0).describe("Offset for pagination (default: 0)"),
-      sort: z.array(z.record(z.unknown())).optional().describe("Sort specification (array of sort objects, e.g. [{\"@timestamp\": \"desc\"}])"),
-      _source: z.union([
-        z.boolean(),
-        z.array(z.string()),
-        z.record(z.unknown()),
-      ]).optional().describe("Source filtering: boolean, array of field names, or object with includes/excludes"),
+      index: z.string().optional().describe("Index name or pattern to search (optional, searches all if omitted). Supports comma-separated names and wildcards."),
+      body: z.record(z.unknown()).describe("Full Elasticsearch Search API request body. Supports all fields: query, aggs, size, from, sort, _source, highlight, track_total_hits, etc."),
     },
     async (params) => {
       try {
-        const query = params.query ?? { match_all: {} };
-        const result = await esClient.search(params.index, query, params.size, params.from, params.sort, params._source);
+        const body = { ...params.body };
+        if (!body.query) body.query = { match_all: {} };
+        const result = await esClient.search(params.index, body);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
         };
