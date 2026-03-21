@@ -33,4 +33,4 @@ vendor/
 
 # Test coverage files
 coverage.out
-coverage.html 
+coverage.html mcp-elasticsearch-linux

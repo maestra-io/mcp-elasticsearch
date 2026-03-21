@@ -16,6 +16,25 @@ import (
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 )
 
+// productCheckRoundTripper injects the X-Elastic-Product header into responses
+// from Elasticsearch versions older than 7.14 that don't include it natively.
+// The go-elasticsearch/v8 client requires this header and refuses to process
+// responses without it.
+type productCheckRoundTripper struct {
+	wrapped http.RoundTripper
+}
+
+func (rt *productCheckRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := rt.wrapped.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+	if resp.Header.Get("X-Elastic-Product") == "" {
+		resp.Header.Set("X-Elastic-Product", "Elasticsearch")
+	}
+	return resp, nil
+}
+
 // Client defines the interface for Elasticsearch operations.
 // It abstracts the underlying Elasticsearch client to provide a consistent API
 // for all supported Elasticsearch versions (7, 8, 9).
@@ -59,14 +78,18 @@ type ESClient struct {
 //   - Client: Configured Elasticsearch client interface
 //   - error: Any error that occurred during client creation
 func NewClient(cfg *config.ElasticsearchConfig, version string) (Client, error) {
-	// Configure the Elasticsearch client with connection settings
+	// Configure the Elasticsearch client with connection settings.
+	// The productCheckRoundTripper wraps the default transport to inject the
+	// X-Elastic-Product header for ES versions < 7.14 that don't send it.
+	baseTransport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: cfg.InsecureSkipVerify,
+		},
+	}
+
 	esConfig := elasticsearch8.Config{
 		Addresses: cfg.Addresses,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: cfg.InsecureSkipVerify,
-			},
-		},
+		Transport: &productCheckRoundTripper{wrapped: baseTransport},
 		MaxRetries:    cfg.MaxRetries,
 		RetryOnStatus: []int{502, 503, 504, 429},
 		Logger:        &esLogger{},
