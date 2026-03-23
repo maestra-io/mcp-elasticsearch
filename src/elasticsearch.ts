@@ -54,6 +54,8 @@ export class ElasticsearchClient {
         if ([502, 503, 504, 429].includes(response.status)) {
           if (attempt < this.maxRetries) {
             lastError = new Error(`ES returned ${response.status}`);
+            const backoffMs = Math.min(1000 * Math.pow(2, attempt), 10_000);
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
             continue;
           }
           throw new Error(`ES returned ${response.status} after ${this.maxRetries + 1} attempts`);
@@ -79,6 +81,8 @@ export class ElasticsearchClient {
         }
 
         if (attempt >= this.maxRetries) break;
+        const backoffMs = Math.min(1000 * Math.pow(2, attempt), 10_000);
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
       }
     }
 

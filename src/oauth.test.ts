@@ -263,7 +263,7 @@ describe("mountOAuthRoutes", () => {
         res,
       );
       expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.send).toHaveBeenCalledWith("Google OAuth error: access_denied");
+      expect(res.json).toHaveBeenCalledWith({ error: "Google OAuth error", details: "access_denied" });
     });
 
     it("returns error for invalid/expired state", async () => {

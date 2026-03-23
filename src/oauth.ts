@@ -1,6 +1,10 @@
-import { randomUUID, randomBytes, createHash } from "node:crypto";
+import { randomUUID, randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import express from "express";
 import { config } from "./config.js";
+
+const MAX_CLIENTS = 1000;
+const MAX_AUTH_CODES = 1000;
+const MAX_PENDING_AUTHS = 1000;
 
 // --- In-memory stores (short-lived, stateless between restarts) ---
 
@@ -56,13 +60,19 @@ export function isValidRedirectUri(uri: string): boolean {
 
 /** Check if a Bearer token is a valid OAuth-issued token. Returns email or null. */
 export function validateOAuthToken(token: string): string | null {
-  const entry = accessTokens.get(token);
-  if (!entry) return null;
-  if (entry.expiresAt < Date.now()) {
-    accessTokens.delete(token);
-    return null;
+  const now = Date.now();
+  const tokenBuf = Buffer.from(token);
+  for (const [storedToken, data] of accessTokens) {
+    const storedBuf = Buffer.from(storedToken);
+    if (tokenBuf.length === storedBuf.length && timingSafeEqual(tokenBuf, storedBuf)) {
+      if (now < data.expiresAt) {
+        return data.email;
+      }
+      accessTokens.delete(storedToken);
+      return null;
+    }
   }
-  return entry.email;
+  return null;
 }
 
 /** Mount OAuth routes on the Express app. */
@@ -119,6 +129,11 @@ export function mountOAuthRoutes(app: express.Express): void {
       }
     }
 
+    if (clients.size >= MAX_CLIENTS) {
+      res.status(503).json({ error: "Too many registered clients" });
+      return;
+    }
+
     const clientId = randomUUID();
     clients.set(clientId, { redirectUris: redirect_uris, name: client_name });
     console.log(`OAuth: registered client ${clientId} (${client_name ?? "unnamed"})`);
@@ -158,6 +173,11 @@ export function mountOAuthRoutes(app: express.Express): void {
       return;
     }
 
+    if (pendingAuths.size >= MAX_PENDING_AUTHS) {
+      res.status(503).json({ error: "Too many pending authorizations" });
+      return;
+    }
+
     const googleState = randomBytes(32).toString("hex");
     pendingAuths.set(googleState, {
       clientId: client_id,
@@ -185,7 +205,7 @@ export function mountOAuthRoutes(app: express.Express): void {
     const { code: googleCode, state: googleState, error } = req.query as Record<string, string>;
 
     if (error) {
-      res.status(400).send(`Google OAuth error: ${error}`);
+      res.status(400).json({ error: "Google OAuth error", details: String(error) });
       return;
     }
 
@@ -226,7 +246,12 @@ export function mountOAuthRoutes(app: express.Express): void {
 
       const payload = JSON.parse(
         Buffer.from(tokenData.id_token.split(".")[1], "base64url").toString(),
-      ) as { email?: string; hd?: string };
+      ) as { email?: string; hd?: string; aud?: string };
+
+      if (payload.aud !== config.googleClientId) {
+        res.status(400).send("Invalid token audience");
+        return;
+      }
 
       if (!payload.email || !payload.email.endsWith("@maestra.io")) {
         console.warn(`OAuth: rejected login from ${payload.email} (not @maestra.io)`);
@@ -235,6 +260,11 @@ export function mountOAuthRoutes(app: express.Express): void {
       }
 
       console.log(`OAuth: authorized ${payload.email}`);
+
+      if (authCodes.size >= MAX_AUTH_CODES) {
+        res.status(503).send("Too many pending auth codes");
+        return;
+      }
 
       const ourCode = randomBytes(32).toString("hex");
       authCodes.set(ourCode, {
@@ -277,6 +307,7 @@ export function mountOAuthRoutes(app: express.Express): void {
 
     if (authCode.clientId !== client_id || authCode.redirectUri !== redirect_uri) {
       console.warn("OAuth /token: client/redirect mismatch");
+      authCodes.delete(code);
       res.status(400).json({ error: "invalid_grant", error_description: "Client/redirect mismatch" });
       return;
     }

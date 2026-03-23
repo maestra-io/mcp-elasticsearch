@@ -58,7 +58,7 @@ app.use("/mcp", (req, res, next) => {
     return;
   }
 
-  console.warn(`Auth rejected: invalid token (length=${token.length}, prefix=${token.slice(0, 4)}...)`);
+  console.warn("Auth rejected: invalid Bearer token");
   res.status(401).json({ error: "Invalid token" });
 });
 
@@ -107,6 +107,21 @@ function asyncHandler(fn: (req: express.Request, res: express.Response) => Promi
     fn(req, res).catch(next);
   };
 }
+
+// Normalize JSON-RPC: some clients send "params": null instead of "params": {}
+// which causes the MCP SDK's StreamableHTTPServerTransport to return 400.
+app.use("/mcp", (req, _res, next) => {
+  if (Array.isArray(req.body)) {
+    for (const item of req.body) {
+      if (item && item.params === null) {
+        item.params = {};
+      }
+    }
+  } else if (req.body && req.body.params === null) {
+    req.body.params = {};
+  }
+  next();
+});
 
 app.post("/mcp", asyncHandler(async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
@@ -192,6 +207,8 @@ const port = config.port;
 const server = app.listen(port, () => {
   console.log(`Elasticsearch MCP server listening on port ${port}`);
 });
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
 
 // Graceful shutdown
 function shutdown(signal: string) {
