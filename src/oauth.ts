@@ -1,11 +1,21 @@
-import { randomUUID, randomBytes, createHash } from "node:crypto";
+import { randomUUID, randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import express from "express";
 import { config } from "./config.js";
+
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+const MAX_CLIENTS = 1000;
+const MAX_AUTH_CODES = 1000;
+const MAX_PENDING_AUTHS = 1000;
+const MAX_ACCESS_TOKENS = 10000;
 
 // --- In-memory stores (short-lived, stateless between restarts) ---
 
 /** Dynamically registered OAuth clients */
-const clients = new Map<string, { redirectUris: string[]; name?: string }>();
+const CLIENT_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const clients = new Map<string, { redirectUris: string[]; name?: string; createdAt: number }>();
 
 /** Pending authorization requests: code -> { clientId, redirectUri, codeChallenge, email } */
 const authCodes = new Map<string, {
@@ -31,12 +41,18 @@ const pendingAuths = new Map<string, {
 }>();
 
 // Cleanup expired entries every 10 minutes
-setInterval(() => {
+const oauthCleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [k, v] of authCodes) if (v.expiresAt < now) authCodes.delete(k);
   for (const [k, v] of accessTokens) if (v.expiresAt < now) accessTokens.delete(k);
   for (const [k, v] of pendingAuths) if (v.expiresAt < now) pendingAuths.delete(k);
-}, 10 * 60 * 1000).unref();
+  for (const [k, v] of clients) if (now - v.createdAt > CLIENT_TTL) clients.delete(k);
+}, 10 * 60 * 1000);
+oauthCleanupInterval.unref();
+
+export function stopOAuthCleanup() {
+  clearInterval(oauthCleanupInterval);
+}
 
 // --- Helpers ---
 
@@ -56,13 +72,9 @@ export function isValidRedirectUri(uri: string): boolean {
 
 /** Check if a Bearer token is a valid OAuth-issued token. Returns email or null. */
 export function validateOAuthToken(token: string): string | null {
-  const entry = accessTokens.get(token);
-  if (!entry) return null;
-  if (entry.expiresAt < Date.now()) {
-    accessTokens.delete(token);
-    return null;
-  }
-  return entry.email;
+  const data = accessTokens.get(hashToken(token));
+  if (data && Date.now() < data.expiresAt) return data.email;
+  return null;
 }
 
 /** Mount OAuth routes on the Express app. */
@@ -119,8 +131,13 @@ export function mountOAuthRoutes(app: express.Express): void {
       }
     }
 
+    if (clients.size >= MAX_CLIENTS) {
+      res.status(503).json({ error: "Too many registered clients" });
+      return;
+    }
+
     const clientId = randomUUID();
-    clients.set(clientId, { redirectUris: redirect_uris, name: client_name });
+    clients.set(clientId, { redirectUris: redirect_uris, name: client_name, createdAt: Date.now() });
     console.log(`OAuth: registered client ${clientId} (${client_name ?? "unnamed"})`);
 
     res.status(201).json({
@@ -157,6 +174,15 @@ export function mountOAuthRoutes(app: express.Express): void {
       res.status(400).json({ error: "invalid_request", error_description: "PKCE required" });
       return;
     }
+    if (code_challenge_method && code_challenge_method !== "S256") {
+      res.status(400).json({ error: "unsupported_code_challenge_method", error_description: "Only S256 is supported" });
+      return;
+    }
+
+    if (pendingAuths.size >= MAX_PENDING_AUTHS) {
+      res.status(503).json({ error: "Too many pending authorizations" });
+      return;
+    }
 
     const googleState = randomBytes(32).toString("hex");
     pendingAuths.set(googleState, {
@@ -185,13 +211,14 @@ export function mountOAuthRoutes(app: express.Express): void {
     const { code: googleCode, state: googleState, error } = req.query as Record<string, string>;
 
     if (error) {
-      res.status(400).send(`Google OAuth error: ${error}`);
+      res.status(400).json({ error: "Google OAuth error", details: String(error) });
       return;
     }
 
     const pending = pendingAuths.get(googleState);
-    if (!pending) {
-      res.status(400).send("Invalid or expired OAuth state");
+    if (!pending || Date.now() > pending.expiresAt) {
+      if (pending) pendingAuths.delete(googleState);
+      res.status(400).json({ error: "invalid_request", error_description: "Invalid or expired OAuth state" });
       return;
     }
     pendingAuths.delete(googleState);
@@ -212,7 +239,7 @@ export function mountOAuthRoutes(app: express.Express): void {
       if (!tokenResponse.ok) {
         const err = await tokenResponse.text();
         console.error(`OAuth: Google token exchange failed (${tokenResponse.status}): ${err}`);
-        res.status(500).send("Google token exchange failed");
+        res.status(500).json({ error: "server_error", error_description: "Google token exchange failed" });
         return;
       }
 
@@ -220,21 +247,31 @@ export function mountOAuthRoutes(app: express.Express): void {
 
       if (!tokenData.id_token) {
         console.error("OAuth: Google response missing id_token");
-        res.status(500).send("Google token exchange returned no id_token");
+        res.status(500).json({ error: "server_error", error_description: "Google token exchange returned no id_token" });
         return;
       }
 
       const payload = JSON.parse(
         Buffer.from(tokenData.id_token.split(".")[1], "base64url").toString(),
-      ) as { email?: string; hd?: string };
+      ) as { email?: string; hd?: string; aud?: string };
+
+      if (payload.aud !== config.googleClientId) {
+        res.status(400).json({ error: "invalid_request", error_description: "Invalid token audience" });
+        return;
+      }
 
       if (!payload.email || !payload.email.endsWith("@maestra.io")) {
         console.warn(`OAuth: rejected login from ${payload.email} (not @maestra.io)`);
-        res.status(403).send("Access restricted to @maestra.io accounts");
+        res.status(403).json({ error: "access_denied", error_description: "Access restricted to @maestra.io accounts" });
         return;
       }
 
       console.log(`OAuth: authorized ${payload.email}`);
+
+      if (authCodes.size >= MAX_AUTH_CODES) {
+        res.status(503).json({ error: "server_error", error_description: "Too many pending auth codes" });
+        return;
+      }
 
       const ourCode = randomBytes(32).toString("hex");
       authCodes.set(ourCode, {
@@ -252,7 +289,7 @@ export function mountOAuthRoutes(app: express.Express): void {
       res.redirect(redirectUrl.toString());
     } catch (err) {
       console.error(`OAuth: callback error: ${err}`);
-      res.status(500).send("OAuth callback failed");
+      res.status(500).json({ error: "server_error", error_description: "OAuth callback failed" });
     }
   });
 
@@ -277,6 +314,7 @@ export function mountOAuthRoutes(app: express.Express): void {
 
     if (authCode.clientId !== client_id || authCode.redirectUri !== redirect_uri) {
       console.warn("OAuth /token: client/redirect mismatch");
+      authCodes.delete(code);
       res.status(400).json({ error: "invalid_grant", error_description: "Client/redirect mismatch" });
       return;
     }
@@ -294,7 +332,9 @@ export function mountOAuthRoutes(app: express.Express): void {
 
     if (code_verifier) {
       const expected = createHash("sha256").update(code_verifier).digest("base64url");
-      if (expected !== authCode.codeChallenge) {
+      const expectedBuf = Buffer.from(expected);
+      const storedBuf = Buffer.from(authCode.codeChallenge);
+      if (expectedBuf.length !== storedBuf.length || !timingSafeEqual(expectedBuf, storedBuf)) {
         res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
         return;
       }
@@ -302,9 +342,14 @@ export function mountOAuthRoutes(app: express.Express): void {
 
     authCodes.delete(code);
 
+    if (accessTokens.size >= MAX_ACCESS_TOKENS) {
+      res.status(503).json({ error: "server_error", error_description: "Too many active tokens" });
+      return;
+    }
+
     const accessToken = randomBytes(32).toString("hex");
     const expiresIn = 24 * 60 * 60; // 24h
-    accessTokens.set(accessToken, {
+    accessTokens.set(hashToken(accessToken), {
       email: authCode.email,
       expiresAt: Date.now() + expiresIn * 1000,
     });

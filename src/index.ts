@@ -4,10 +4,10 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "node:crypto";
 import express from "express";
 import { config } from "./config.js";
-import { timingSafeEqual } from "node:crypto";
-import { mountOAuthRoutes, validateOAuthToken } from "./oauth.js";
+import { mountOAuthRoutes, validateOAuthToken, stopOAuthCleanup } from "./oauth.js";
 import { ElasticsearchClient } from "./elasticsearch.js";
 import { registerTools } from "./tools.js";
+import { safeEqual, normalizeJsonRpcParams } from "./utils.js";
 
 const app = express();
 app.use(express.json({ limit: config.bodyLimit }));
@@ -38,7 +38,7 @@ app.use("/mcp", (req, res, next) => {
   const auth = req.headers.authorization;
   if (!auth || !auth.startsWith("Bearer ")) {
     console.warn(`Auth rejected: missing or non-Bearer auth header (got: ${auth ? auth.split(" ")[0] : "none"})`);
-    res.status(401).json({ error: "Bearer token required" });
+    res.status(401).json({ jsonrpc: "2.0", error: { code: -32000, message: "Bearer token required" }, id: null });
     return;
   }
 
@@ -58,16 +58,9 @@ app.use("/mcp", (req, res, next) => {
     return;
   }
 
-  console.warn(`Auth rejected: invalid token (length=${token.length}, prefix=${token.slice(0, 4)}...)`);
-  res.status(401).json({ error: "Invalid token" });
+  console.warn("Auth rejected: invalid Bearer token");
+  res.status(401).json({ jsonrpc: "2.0", error: { code: -32000, message: "Invalid token" }, id: null });
 });
-
-function safeEqual(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  if (bufA.length !== bufB.length) return false;
-  return timingSafeEqual(bufA, bufB);
-}
 
 const esClient = new ElasticsearchClient();
 
@@ -108,6 +101,13 @@ function asyncHandler(fn: (req: express.Request, res: express.Response) => Promi
   };
 }
 
+// Normalize JSON-RPC: some clients send "params": null instead of "params": {}
+// which causes the MCP SDK's StreamableHTTPServerTransport to return 400.
+app.use("/mcp", (req, _res, next) => {
+  normalizeJsonRpcParams(req.body);
+  next();
+});
+
 app.post("/mcp", asyncHandler(async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
@@ -121,13 +121,13 @@ app.post("/mcp", asyncHandler(async (req, res) => {
 
   // Reject non-init requests without valid session
   if (sessionId && !sessions.has(sessionId)) {
-    res.status(404).json({ error: "Session not found" });
+    res.status(404).json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null });
     return;
   }
 
   // Enforce session limit
   if (sessions.size >= config.maxSessions) {
-    res.status(503).json({ error: "Too many active sessions" });
+    res.status(503).json({ jsonrpc: "2.0", error: { code: -32000, message: "Too many active sessions" }, id: null });
     return;
   }
 
@@ -161,11 +161,11 @@ app.post("/mcp", asyncHandler(async (req, res) => {
 app.get("/mcp", asyncHandler(async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
   if (!sessionId) {
-    res.status(400).json({ error: "Missing session ID" });
+    res.status(400).json({ jsonrpc: "2.0", error: { code: -32600, message: "Missing session ID" }, id: null });
     return;
   }
   if (!sessions.has(sessionId)) {
-    res.status(404).json({ error: "Session not found or expired" });
+    res.status(404).json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found or expired" }, id: null });
     return;
   }
   const session = sessions.get(sessionId)!;
@@ -175,7 +175,11 @@ app.get("/mcp", asyncHandler(async (req, res) => {
 
 app.delete("/mcp", asyncHandler(async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  if (sessionId && sessions.has(sessionId)) {
+  if (!sessionId) {
+    res.status(400).json({ jsonrpc: "2.0", error: { code: -32600, message: "Missing session ID" }, id: null });
+    return;
+  }
+  if (sessions.has(sessionId)) {
     const session = sessions.get(sessionId)!;
     await session.transport.close();
     session.server.close().catch(() => {});
@@ -192,11 +196,14 @@ const port = config.port;
 const server = app.listen(port, () => {
   console.log(`Elasticsearch MCP server listening on port ${port}`);
 });
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
 
 // Graceful shutdown
 function shutdown(signal: string) {
   console.log(`Received ${signal}, shutting down gracefully...`);
   clearInterval(cleanupInterval);
+  stopOAuthCleanup();
 
   for (const [id, session] of sessions) {
     session.transport.close().catch(() => {});

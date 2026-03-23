@@ -1,13 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { timingSafeEqual } from "node:crypto";
-
-// Test the safeEqual function logic (extracted from index.ts)
-function safeEqual(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  if (bufA.length !== bufB.length) return false;
-  return timingSafeEqual(bufA, bufB);
-}
+import { safeEqual, normalizeJsonRpcParams } from "./utils.js";
 
 describe("safeEqual", () => {
   it("returns true for equal strings", () => {
@@ -63,31 +55,26 @@ describe("auth middleware logic", () => {
   });
 });
 
-describe("session management logic", () => {
-  it("session TTL check works correctly", () => {
-    const SESSION_TTL_MS = 30 * 60 * 1000;
-    const now = Date.now();
-
-    const recentSession = { lastAccess: now - 1000 };
-    expect(now - recentSession.lastAccess > SESSION_TTL_MS).toBe(false);
-
-    const oldSession = { lastAccess: now - SESSION_TTL_MS - 1 };
-    expect(now - oldSession.lastAccess > SESSION_TTL_MS).toBe(true);
-
-    const borderSession = { lastAccess: now - SESSION_TTL_MS };
-    expect(now - borderSession.lastAccess > SESSION_TTL_MS).toBe(false);
+describe("params normalization", () => {
+  it("converts params:null to {} in single request", () => {
+    const body = { jsonrpc: "2.0", method: "test", params: null as Record<string, unknown> | null };
+    normalizeJsonRpcParams(body);
+    expect(body.params).toEqual({});
   });
 
-  it("max sessions limit enforcement", () => {
-    const maxSessions = 1000;
-    const sessions = new Map();
+  it("converts params:null in batch requests", () => {
+    const body = [
+      { jsonrpc: "2.0", method: "a", params: null as Record<string, unknown> | null },
+      { jsonrpc: "2.0", method: "b", params: { x: 1 } as Record<string, unknown> | null },
+    ];
+    normalizeJsonRpcParams(body);
+    expect(body[0].params).toEqual({});
+    expect(body[1].params).toEqual({ x: 1 });
+  });
 
-    for (let i = 0; i < maxSessions; i++) {
-      sessions.set(`session-${i}`, { lastAccess: Date.now() });
-    }
-    expect(sessions.size >= maxSessions).toBe(true);
-
-    const shouldReject = sessions.size >= maxSessions;
-    expect(shouldReject).toBe(true);
+  it("leaves valid params unchanged", () => {
+    const body = { jsonrpc: "2.0", method: "test", params: { foo: "bar" } as Record<string, unknown> | null };
+    normalizeJsonRpcParams(body);
+    expect(body.params).toEqual({ foo: "bar" });
   });
 });

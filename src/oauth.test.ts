@@ -49,7 +49,13 @@ describe("validateOAuthToken", () => {
   it("returns null for unknown token", () => {
     expect(validateOAuthToken("nonexistent-token")).toBeNull();
   });
+
+  // Note: Testing valid token (returns email) and expired token (returns null)
+  // requires access to the internal accessTokens map. The map is not exported,
+  // so a full OAuth flow mock (register -> authorize -> callback -> token) would
+  // be needed to seed a real token. This is covered by integration/E2E tests.
 });
+
 
 describe("mountOAuthRoutes", () => {
   let routes: Record<string, Record<string, Function>>;
@@ -263,7 +269,7 @@ describe("mountOAuthRoutes", () => {
         res,
       );
       expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.send).toHaveBeenCalledWith("Google OAuth error: access_denied");
+      expect(res.json).toHaveBeenCalledWith({ error: "Google OAuth error", details: "access_denied" });
     });
 
     it("returns error for invalid/expired state", async () => {
@@ -273,7 +279,7 @@ describe("mountOAuthRoutes", () => {
         res,
       );
       expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.send).toHaveBeenCalledWith("Invalid or expired OAuth state");
+      expect(res.json).toHaveBeenCalledWith({ error: "invalid_request", error_description: "Invalid or expired OAuth state" });
     });
   });
 

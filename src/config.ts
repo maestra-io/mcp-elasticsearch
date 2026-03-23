@@ -6,11 +6,13 @@ function requireEnv(name: string): string {
   return value;
 }
 
-function parseIntSafe(value: string, name: string): number {
-  const trimmed = value.trim();
+function parseIntSafe(raw: string | undefined, fallback: number, min = 0): number {
+  if (!raw) return fallback;
+  const trimmed = raw.trim();
+  if (trimmed === "") return fallback;
   const n = Number(trimmed);
-  if (!Number.isInteger(n)) {
-    throw new Error(`Environment variable ${name} must be a valid integer, got: "${value}"`);
+  if (!Number.isInteger(n) || n < min) {
+    throw new Error(`Invalid integer value: "${raw}" (min: ${min})`);
   }
   return n;
 }
@@ -18,12 +20,12 @@ function parseIntSafe(value: string, name: string): number {
 export const config = {
   // Elasticsearch
   esAddresses: requireEnv("ES_ADDRESSES").split(",").map((a) => a.trim()).filter(Boolean),
-  esTimeout: parseIntSafe(process.env.ES_TIMEOUT ?? "30000", "ES_TIMEOUT"),
-  esMaxRetries: parseIntSafe(process.env.ES_MAX_RETRIES ?? "3", "ES_MAX_RETRIES"),
+  esTimeout: parseIntSafe(process.env.ES_TIMEOUT, 30000),
+  esMaxRetries: parseIntSafe(process.env.ES_MAX_RETRIES, 3),
 
   // Server
-  port: parseIntSafe(process.env.PORT ?? "8080", "PORT"),
-  maxSessions: parseIntSafe(process.env.MAX_SESSIONS ?? "1000", "MAX_SESSIONS"),
+  port: parseIntSafe(process.env.PORT, 8080, 1),
+  maxSessions: parseIntSafe(process.env.MAX_SESSIONS, 1000, 1),
   bodyLimit: process.env.BODY_LIMIT ?? "1mb",
 
   // Auth
