@@ -1,10 +1,10 @@
 import { randomUUID, randomBytes, createHash, timingSafeEqual } from "node:crypto";
+import express from "express";
+import { config } from "./config.js";
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
-import express from "express";
-import { config } from "./config.js";
 
 const MAX_CLIENTS = 1000;
 const MAX_AUTH_CODES = 1000;
