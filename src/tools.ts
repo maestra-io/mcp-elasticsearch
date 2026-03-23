@@ -2,6 +2,18 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ElasticsearchClient } from "./elasticsearch.js";
 
+export function applySearchDefaults(body: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...body };
+  if (result.size === undefined) {
+    result.size = 10;
+  } else if (typeof result.size === "number" && Number.isInteger(result.size) && result.size >= 0) {
+    result.size = Math.min(result.size as number, 500);
+  }
+  // Non-numeric or invalid size values pass through for ES to validate
+  if (!result.query) result.query = { match_all: {} };
+  return result;
+}
+
 export function registerTools(server: McpServer, esClient: ElasticsearchClient): void {
   server.tool(
     "es_cluster_info",
@@ -72,14 +84,7 @@ The index parameter is optional — omit it to search across all indices.`,
     },
     async (params) => {
       try {
-        const body = { ...params.body };
-        if (body.size === undefined) {
-          body.size = 10;
-        } else if (typeof body.size === "number" && Number.isInteger(body.size) && body.size >= 0) {
-          body.size = Math.min(body.size, 500);
-        }
-        // Non-numeric or invalid size values pass through for ES to validate
-        if (!body.query) body.query = { match_all: {} };
+        const body = applySearchDefaults(params.body as Record<string, unknown>);
         const result = await esClient.search(params.index, body);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],

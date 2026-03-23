@@ -1,20 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-
-/**
- * Test the size validation and query defaulting logic used in es_search tool.
- * We replicate the logic from tools.ts to test it in isolation without
- * needing to spin up a full McpServer + ElasticsearchClient.
- */
-function applySearchDefaults(body: Record<string, unknown>): Record<string, unknown> {
-  const result = { ...body };
-  if (result.size === undefined) {
-    result.size = 10;
-  } else if (typeof result.size === "number" && Number.isInteger(result.size) && result.size >= 0) {
-    result.size = Math.min(result.size as number, 500);
-  }
-  if (!result.query) result.query = { match_all: {} };
-  return result;
-}
+import { describe, it, expect } from "vitest";
+import { applySearchDefaults } from "./tools.js";
 
 describe("es_search size validation", () => {
   it("defaults size to 10 when omitted", () => {

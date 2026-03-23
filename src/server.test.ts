@@ -1,13 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { timingSafeEqual } from "node:crypto";
-
-// Test the safeEqual function logic (extracted from index.ts)
-function safeEqual(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  if (bufA.length !== bufB.length) return false;
-  return timingSafeEqual(bufA, bufB);
-}
+import { safeEqual, normalizeJsonRpcParams } from "./utils.js";
 
 describe("safeEqual", () => {
   it("returns true for equal strings", () => {
@@ -66,7 +58,7 @@ describe("auth middleware logic", () => {
 describe("params normalization", () => {
   it("converts params:null to {} in single request", () => {
     const body = { jsonrpc: "2.0", method: "test", params: null as Record<string, unknown> | null };
-    if (body.params === null) body.params = {};
+    normalizeJsonRpcParams(body);
     expect(body.params).toEqual({});
   });
 
@@ -75,17 +67,14 @@ describe("params normalization", () => {
       { jsonrpc: "2.0", method: "a", params: null as Record<string, unknown> | null },
       { jsonrpc: "2.0", method: "b", params: { x: 1 } as Record<string, unknown> | null },
     ];
-    for (const item of body) {
-      if (item && item.params === null) item.params = {};
-    }
+    normalizeJsonRpcParams(body);
     expect(body[0].params).toEqual({});
     expect(body[1].params).toEqual({ x: 1 });
   });
 
   it("leaves valid params unchanged", () => {
     const body = { jsonrpc: "2.0", method: "test", params: { foo: "bar" } as Record<string, unknown> | null };
-    if (body.params === null) body.params = {};
+    normalizeJsonRpcParams(body);
     expect(body.params).toEqual({ foo: "bar" });
   });
 });
-

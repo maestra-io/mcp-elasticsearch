@@ -4,10 +4,10 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { randomUUID } from "node:crypto";
 import express from "express";
 import { config } from "./config.js";
-import { timingSafeEqual } from "node:crypto";
 import { mountOAuthRoutes, validateOAuthToken, stopOAuthCleanup } from "./oauth.js";
 import { ElasticsearchClient } from "./elasticsearch.js";
 import { registerTools } from "./tools.js";
+import { safeEqual, normalizeJsonRpcParams } from "./utils.js";
 
 const app = express();
 app.use(express.json({ limit: config.bodyLimit }));
@@ -62,13 +62,6 @@ app.use("/mcp", (req, res, next) => {
   res.status(401).json({ jsonrpc: "2.0", error: { code: -32000, message: "Invalid token" }, id: null });
 });
 
-function safeEqual(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  if (bufA.length !== bufB.length) return false;
-  return timingSafeEqual(bufA, bufB);
-}
-
 const esClient = new ElasticsearchClient();
 
 function createServer(): McpServer {
@@ -111,15 +104,7 @@ function asyncHandler(fn: (req: express.Request, res: express.Response) => Promi
 // Normalize JSON-RPC: some clients send "params": null instead of "params": {}
 // which causes the MCP SDK's StreamableHTTPServerTransport to return 400.
 app.use("/mcp", (req, _res, next) => {
-  if (Array.isArray(req.body)) {
-    for (const item of req.body) {
-      if (item && item.params === null) {
-        item.params = {};
-      }
-    }
-  } else if (req.body && req.body.params === null) {
-    req.body.params = {};
-  }
+  normalizeJsonRpcParams(req.body);
   next();
 });
 
