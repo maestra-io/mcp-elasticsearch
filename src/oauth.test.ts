@@ -56,25 +56,6 @@ describe("validateOAuthToken", () => {
   // be needed to seed a real token. This is covered by integration/E2E tests.
 });
 
-describe("OAuth capacity limits", () => {
-  // The capacity check pattern used throughout oauth.ts:
-  //   if (map.size >= MAX) { return 503; }
-  // We verify the logic works correctly.
-
-  it("capacity guard rejects at limit", () => {
-    const MAX = 100;
-    const map = new Map<string, unknown>();
-    for (let i = 0; i < MAX; i++) map.set(`k-${i}`, {});
-    expect(map.size >= MAX).toBe(true);
-  });
-
-  it("capacity guard allows under limit", () => {
-    const MAX = 100;
-    const map = new Map<string, unknown>();
-    for (let i = 0; i < MAX - 1; i++) map.set(`k-${i}`, {});
-    expect(map.size >= MAX).toBe(false);
-  });
-});
 
 describe("mountOAuthRoutes", () => {
   let routes: Record<string, Record<string, Function>>;
