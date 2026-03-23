@@ -216,7 +216,8 @@ export function mountOAuthRoutes(app: express.Express): void {
     }
 
     const pending = pendingAuths.get(googleState);
-    if (!pending) {
+    if (!pending || Date.now() > pending.expiresAt) {
+      if (pending) pendingAuths.delete(googleState);
       res.status(400).json({ error: "invalid_request", error_description: "Invalid or expired OAuth state" });
       return;
     }
