@@ -38,7 +38,7 @@ app.use("/mcp", (req, res, next) => {
   const auth = req.headers.authorization;
   if (!auth || !auth.startsWith("Bearer ")) {
     console.warn(`Auth rejected: missing or non-Bearer auth header (got: ${auth ? auth.split(" ")[0] : "none"})`);
-    res.status(401).json({ error: "Bearer token required" });
+    res.status(401).json({ jsonrpc: "2.0", error: { code: -32000, message: "Bearer token required" }, id: null });
     return;
   }
 
@@ -59,7 +59,7 @@ app.use("/mcp", (req, res, next) => {
   }
 
   console.warn("Auth rejected: invalid Bearer token");
-  res.status(401).json({ error: "Invalid token" });
+  res.status(401).json({ jsonrpc: "2.0", error: { code: -32000, message: "Invalid token" }, id: null });
 });
 
 function safeEqual(a: string, b: string): boolean {
@@ -136,13 +136,13 @@ app.post("/mcp", asyncHandler(async (req, res) => {
 
   // Reject non-init requests without valid session
   if (sessionId && !sessions.has(sessionId)) {
-    res.status(404).json({ error: "Session not found" });
+    res.status(404).json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null });
     return;
   }
 
   // Enforce session limit
   if (sessions.size >= config.maxSessions) {
-    res.status(503).json({ error: "Too many active sessions" });
+    res.status(503).json({ jsonrpc: "2.0", error: { code: -32000, message: "Too many active sessions" }, id: null });
     return;
   }
 
@@ -176,11 +176,11 @@ app.post("/mcp", asyncHandler(async (req, res) => {
 app.get("/mcp", asyncHandler(async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
   if (!sessionId) {
-    res.status(400).json({ error: "Missing session ID" });
+    res.status(400).json({ jsonrpc: "2.0", error: { code: -32600, message: "Missing session ID" }, id: null });
     return;
   }
   if (!sessions.has(sessionId)) {
-    res.status(404).json({ error: "Session not found or expired" });
+    res.status(404).json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found or expired" }, id: null });
     return;
   }
   const session = sessions.get(sessionId)!;
@@ -190,7 +190,11 @@ app.get("/mcp", asyncHandler(async (req, res) => {
 
 app.delete("/mcp", asyncHandler(async (req, res) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  if (sessionId && sessions.has(sessionId)) {
+  if (!sessionId) {
+    res.status(400).json({ jsonrpc: "2.0", error: { code: -32600, message: "Missing session ID" }, id: null });
+    return;
+  }
+  if (sessions.has(sessionId)) {
     const session = sessions.get(sessionId)!;
     await session.transport.close();
     session.server.close().catch(() => {});

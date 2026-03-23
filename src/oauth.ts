@@ -5,6 +5,7 @@ import { config } from "./config.js";
 const MAX_CLIENTS = 1000;
 const MAX_AUTH_CODES = 1000;
 const MAX_PENDING_AUTHS = 1000;
+const MAX_ACCESS_TOKENS = 10000;
 
 // --- In-memory stores (short-lived, stateless between restarts) ---
 
@@ -334,6 +335,11 @@ export function mountOAuthRoutes(app: express.Express): void {
     }
 
     authCodes.delete(code);
+
+    if (accessTokens.size >= MAX_ACCESS_TOKENS) {
+      res.status(503).json({ error: "server_error", error_description: "Too many active tokens" });
+      return;
+    }
 
     const accessToken = randomBytes(32).toString("hex");
     const expiresIn = 24 * 60 * 60; // 24h

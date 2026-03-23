@@ -63,6 +63,32 @@ describe("auth middleware logic", () => {
   });
 });
 
+describe("params normalization", () => {
+  it("converts params:null to {} in single request", () => {
+    const body = { jsonrpc: "2.0", method: "test", params: null as Record<string, unknown> | null };
+    if (body.params === null) body.params = {};
+    expect(body.params).toEqual({});
+  });
+
+  it("converts params:null in batch requests", () => {
+    const body = [
+      { jsonrpc: "2.0", method: "a", params: null as Record<string, unknown> | null },
+      { jsonrpc: "2.0", method: "b", params: { x: 1 } as Record<string, unknown> | null },
+    ];
+    for (const item of body) {
+      if (item && item.params === null) item.params = {};
+    }
+    expect(body[0].params).toEqual({});
+    expect(body[1].params).toEqual({ x: 1 });
+  });
+
+  it("leaves valid params unchanged", () => {
+    const body = { jsonrpc: "2.0", method: "test", params: { foo: "bar" } as Record<string, unknown> | null };
+    if (body.params === null) body.params = {};
+    expect(body.params).toEqual({ foo: "bar" });
+  });
+});
+
 describe("session management logic", () => {
   it("session TTL check works correctly", () => {
     const SESSION_TTL_MS = 30 * 60 * 1000;

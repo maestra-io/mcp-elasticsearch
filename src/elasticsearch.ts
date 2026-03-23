@@ -23,7 +23,7 @@ export class ElasticsearchClient {
 
   private nextAddress(): string {
     const addr = this.addresses[this.currentIndex % this.addresses.length];
-    this.currentIndex++;
+    this.currentIndex = (this.currentIndex + 1) % this.addresses.length;
     return addr;
   }
 
@@ -81,7 +81,7 @@ export class ElasticsearchClient {
         }
 
         if (attempt >= this.maxRetries) break;
-        const backoffMs = Math.min(1000 * Math.pow(2, attempt), 10_000);
+        const backoffMs = Math.min(1000 * Math.pow(2, attempt), 10_000) * (0.5 + Math.random() * 0.5);
         await new Promise(resolve => setTimeout(resolve, backoffMs));
       }
     }
