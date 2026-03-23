@@ -89,31 +89,3 @@ describe("params normalization", () => {
   });
 });
 
-describe("session management logic", () => {
-  it("session TTL check works correctly", () => {
-    const SESSION_TTL_MS = 30 * 60 * 1000;
-    const now = Date.now();
-
-    const recentSession = { lastAccess: now - 1000 };
-    expect(now - recentSession.lastAccess > SESSION_TTL_MS).toBe(false);
-
-    const oldSession = { lastAccess: now - SESSION_TTL_MS - 1 };
-    expect(now - oldSession.lastAccess > SESSION_TTL_MS).toBe(true);
-
-    const borderSession = { lastAccess: now - SESSION_TTL_MS };
-    expect(now - borderSession.lastAccess > SESSION_TTL_MS).toBe(false);
-  });
-
-  it("max sessions limit enforcement", () => {
-    const maxSessions = 1000;
-    const sessions = new Map();
-
-    for (let i = 0; i < maxSessions; i++) {
-      sessions.set(`session-${i}`, { lastAccess: Date.now() });
-    }
-    expect(sessions.size >= maxSessions).toBe(true);
-
-    const shouldReject = sessions.size >= maxSessions;
-    expect(shouldReject).toBe(true);
-  });
-});

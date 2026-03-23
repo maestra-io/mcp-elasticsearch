@@ -1,4 +1,8 @@
 import { randomUUID, randomBytes, createHash, timingSafeEqual } from "node:crypto";
+
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
 import express from "express";
 import { config } from "./config.js";
 
@@ -37,13 +41,18 @@ const pendingAuths = new Map<string, {
 }>();
 
 // Cleanup expired entries every 10 minutes
-setInterval(() => {
+const oauthCleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [k, v] of authCodes) if (v.expiresAt < now) authCodes.delete(k);
   for (const [k, v] of accessTokens) if (v.expiresAt < now) accessTokens.delete(k);
   for (const [k, v] of pendingAuths) if (v.expiresAt < now) pendingAuths.delete(k);
   for (const [k, v] of clients) if (now - v.createdAt > CLIENT_TTL) clients.delete(k);
-}, 10 * 60 * 1000).unref();
+}, 10 * 60 * 1000);
+oauthCleanupInterval.unref();
+
+export function stopOAuthCleanup() {
+  clearInterval(oauthCleanupInterval);
+}
 
 // --- Helpers ---
 
@@ -63,18 +72,8 @@ export function isValidRedirectUri(uri: string): boolean {
 
 /** Check if a Bearer token is a valid OAuth-issued token. Returns email or null. */
 export function validateOAuthToken(token: string): string | null {
-  const now = Date.now();
-  const tokenBuf = Buffer.from(token);
-  for (const [storedToken, data] of accessTokens) {
-    const storedBuf = Buffer.from(storedToken);
-    if (tokenBuf.length === storedBuf.length && timingSafeEqual(tokenBuf, storedBuf)) {
-      if (now < data.expiresAt) {
-        return data.email;
-      }
-      accessTokens.delete(storedToken);
-      return null;
-    }
-  }
+  const data = accessTokens.get(hashToken(token));
+  if (data && Date.now() < data.expiresAt) return data.email;
   return null;
 }
 
@@ -173,6 +172,10 @@ export function mountOAuthRoutes(app: express.Express): void {
     }
     if (!code_challenge) {
       res.status(400).json({ error: "invalid_request", error_description: "PKCE required" });
+      return;
+    }
+    if (code_challenge_method && code_challenge_method !== "S256") {
+      res.status(400).json({ error: "unsupported_code_challenge_method", error_description: "Only S256 is supported" });
       return;
     }
 
@@ -328,7 +331,9 @@ export function mountOAuthRoutes(app: express.Express): void {
 
     if (code_verifier) {
       const expected = createHash("sha256").update(code_verifier).digest("base64url");
-      if (expected !== authCode.codeChallenge) {
+      const expectedBuf = Buffer.from(expected);
+      const storedBuf = Buffer.from(authCode.codeChallenge);
+      if (expectedBuf.length !== storedBuf.length || !timingSafeEqual(expectedBuf, storedBuf)) {
         res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
         return;
       }
@@ -343,7 +348,7 @@ export function mountOAuthRoutes(app: express.Express): void {
 
     const accessToken = randomBytes(32).toString("hex");
     const expiresIn = 24 * 60 * 60; // 24h
-    accessTokens.set(accessToken, {
+    accessTokens.set(hashToken(accessToken), {
       email: authCode.email,
       expiresAt: Date.now() + expiresIn * 1000,
     });

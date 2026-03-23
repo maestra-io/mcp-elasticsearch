@@ -169,7 +169,7 @@ describe("ElasticsearchClient", () => {
     it("throws immediately on non-retryable error status", async () => {
       mockFetchError(400, { error: { type: "parsing_exception", reason: "bad query" } });
 
-      await expect(client.search("idx", { bad: "query" }, 10, 0)).rejects.toThrow("Elasticsearch error (400)");
+      await expect(client.search("idx", { bad: "query" })).rejects.toThrow("Elasticsearch error (400)");
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });

@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import { config } from "./config.js";
 import { timingSafeEqual } from "node:crypto";
-import { mountOAuthRoutes, validateOAuthToken } from "./oauth.js";
+import { mountOAuthRoutes, validateOAuthToken, stopOAuthCleanup } from "./oauth.js";
 import { ElasticsearchClient } from "./elasticsearch.js";
 import { registerTools } from "./tools.js";
 
@@ -218,6 +218,7 @@ server.headersTimeout = 66_000;
 function shutdown(signal: string) {
   console.log(`Received ${signal}, shutting down gracefully...`);
   clearInterval(cleanupInterval);
+  stopOAuthCleanup();
 
   for (const [id, session] of sessions) {
     session.transport.close().catch(() => {});
