@@ -273,7 +273,7 @@ describe("mountOAuthRoutes", () => {
         res,
       );
       expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.send).toHaveBeenCalledWith("Invalid or expired OAuth state");
+      expect(res.json).toHaveBeenCalledWith({ error: "invalid_request", error_description: "Invalid or expired OAuth state" });
     });
   });
 

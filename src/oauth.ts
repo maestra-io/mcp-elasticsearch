@@ -9,7 +9,8 @@ const MAX_PENDING_AUTHS = 1000;
 // --- In-memory stores (short-lived, stateless between restarts) ---
 
 /** Dynamically registered OAuth clients */
-const clients = new Map<string, { redirectUris: string[]; name?: string }>();
+const CLIENT_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const clients = new Map<string, { redirectUris: string[]; name?: string; createdAt: number }>();
 
 /** Pending authorization requests: code -> { clientId, redirectUri, codeChallenge, email } */
 const authCodes = new Map<string, {
@@ -40,6 +41,7 @@ setInterval(() => {
   for (const [k, v] of authCodes) if (v.expiresAt < now) authCodes.delete(k);
   for (const [k, v] of accessTokens) if (v.expiresAt < now) accessTokens.delete(k);
   for (const [k, v] of pendingAuths) if (v.expiresAt < now) pendingAuths.delete(k);
+  for (const [k, v] of clients) if (now - v.createdAt > CLIENT_TTL) clients.delete(k);
 }, 10 * 60 * 1000).unref();
 
 // --- Helpers ---
@@ -135,7 +137,7 @@ export function mountOAuthRoutes(app: express.Express): void {
     }
 
     const clientId = randomUUID();
-    clients.set(clientId, { redirectUris: redirect_uris, name: client_name });
+    clients.set(clientId, { redirectUris: redirect_uris, name: client_name, createdAt: Date.now() });
     console.log(`OAuth: registered client ${clientId} (${client_name ?? "unnamed"})`);
 
     res.status(201).json({
@@ -211,7 +213,7 @@ export function mountOAuthRoutes(app: express.Express): void {
 
     const pending = pendingAuths.get(googleState);
     if (!pending) {
-      res.status(400).send("Invalid or expired OAuth state");
+      res.status(400).json({ error: "invalid_request", error_description: "Invalid or expired OAuth state" });
       return;
     }
     pendingAuths.delete(googleState);
@@ -232,7 +234,7 @@ export function mountOAuthRoutes(app: express.Express): void {
       if (!tokenResponse.ok) {
         const err = await tokenResponse.text();
         console.error(`OAuth: Google token exchange failed (${tokenResponse.status}): ${err}`);
-        res.status(500).send("Google token exchange failed");
+        res.status(500).json({ error: "server_error", error_description: "Google token exchange failed" });
         return;
       }
 
@@ -240,7 +242,7 @@ export function mountOAuthRoutes(app: express.Express): void {
 
       if (!tokenData.id_token) {
         console.error("OAuth: Google response missing id_token");
-        res.status(500).send("Google token exchange returned no id_token");
+        res.status(500).json({ error: "server_error", error_description: "Google token exchange returned no id_token" });
         return;
       }
 
@@ -249,20 +251,20 @@ export function mountOAuthRoutes(app: express.Express): void {
       ) as { email?: string; hd?: string; aud?: string };
 
       if (payload.aud !== config.googleClientId) {
-        res.status(400).send("Invalid token audience");
+        res.status(400).json({ error: "invalid_request", error_description: "Invalid token audience" });
         return;
       }
 
       if (!payload.email || !payload.email.endsWith("@maestra.io")) {
         console.warn(`OAuth: rejected login from ${payload.email} (not @maestra.io)`);
-        res.status(403).send("Access restricted to @maestra.io accounts");
+        res.status(403).json({ error: "access_denied", error_description: "Access restricted to @maestra.io accounts" });
         return;
       }
 
       console.log(`OAuth: authorized ${payload.email}`);
 
       if (authCodes.size >= MAX_AUTH_CODES) {
-        res.status(503).send("Too many pending auth codes");
+        res.status(503).json({ error: "server_error", error_description: "Too many pending auth codes" });
         return;
       }
 
@@ -282,7 +284,7 @@ export function mountOAuthRoutes(app: express.Express): void {
       res.redirect(redirectUrl.toString());
     } catch (err) {
       console.error(`OAuth: callback error: ${err}`);
-      res.status(500).send("OAuth callback failed");
+      res.status(500).json({ error: "server_error", error_description: "OAuth callback failed" });
     }
   });
 

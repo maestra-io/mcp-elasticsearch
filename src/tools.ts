@@ -73,12 +73,12 @@ The index parameter is optional — omit it to search across all indices.`,
     async (params) => {
       try {
         const body = { ...params.body };
-        if (body.size !== undefined && (body.size as number) > 500) {
-          body.size = 500;
-        }
         if (body.size === undefined) {
           body.size = 10;
+        } else if (typeof body.size === "number" && Number.isInteger(body.size) && body.size >= 0) {
+          body.size = Math.min(body.size, 500);
         }
+        // Non-numeric or invalid size values pass through for ES to validate
         if (!body.query) body.query = { match_all: {} };
         const result = await esClient.search(params.index, body);
         return {
