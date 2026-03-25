@@ -20,6 +20,10 @@ const MAX_CLIENTS = 1000;
 const MAX_AUTH_CODES = 1000;
 const MAX_PENDING_AUTHS = 1000;
 const MAX_ACCESS_TOKENS = 10000;
+const MAX_REDIRECT_URIS_PER_CLIENT = 10;
+const MAX_CLIENT_NAME_LENGTH = 256;
+const MAX_STATE_LENGTH = 2048;
+const GOOGLE_FETCH_TIMEOUT_MS = 15_000;
 
 // --- In-memory stores (short-lived, stateless between restarts) ---
 
@@ -27,12 +31,11 @@ const MAX_ACCESS_TOKENS = 10000;
 const CLIENT_TTL = 24 * 60 * 60 * 1000; // 24 hours
 const clients = new Map<string, { redirectUris: string[]; name?: string; createdAt: number }>();
 
-/** Pending authorization requests: code -> { clientId, redirectUri, codeChallenge, email } */
+/** Pending authorization requests: hash(code) -> { clientId, redirectUri, codeChallenge, email } */
 const authCodes = new Map<string, {
   clientId: string;
   redirectUri: string;
   codeChallenge: string;
-  codeChallengeMethod: string;
   email: string;
   expiresAt: number;
 }>();
@@ -45,7 +48,6 @@ const pendingAuths = new Map<string, {
   clientId: string;
   redirectUri: string;
   codeChallenge: string;
-  codeChallengeMethod: string;
   state?: string;
   expiresAt: number;
 }>();
@@ -68,9 +70,14 @@ export function stopOAuthCleanup() {
 
 /** Redact email for logging: "j****@maestra.io" */
 function redactEmail(email: string): string {
-  const [local, domain] = email.split("@");
-  if (!local || !domain) return "****";
-  return `${local[0]}****@${domain}`;
+  const at = email.lastIndexOf("@");
+  if (at <= 0) return "****";
+  return `${email[0]}****${email.slice(at)}`;
+}
+
+/** Extract a single string from an Express query/body value, or undefined */
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }
 
 /** Canonicalize a URI for safe comparison (lowercases scheme+host, resolves path) */
@@ -84,6 +91,7 @@ export function normalizeRedirectUri(uri: string): string {
 export function isValidRedirectUri(uri: string): boolean {
   try {
     const url = new URL(uri);
+    if (url.hash) return false;
     if (url.protocol === "https:") return true;
     if (url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1")) return true;
     return false;
@@ -145,11 +153,21 @@ export function mountOAuthRoutes(app: express.Express): void {
       return;
     }
 
+    if (redirect_uris.length > MAX_REDIRECT_URIS_PER_CLIENT) {
+      res.status(400).json({ error: "invalid_request", error_description: `Too many redirect_uris (max ${MAX_REDIRECT_URIS_PER_CLIENT})` });
+      return;
+    }
+
+    if (client_name !== undefined && (typeof client_name !== "string" || client_name.length > MAX_CLIENT_NAME_LENGTH)) {
+      res.status(400).json({ error: "invalid_request", error_description: `client_name must be a string of at most ${MAX_CLIENT_NAME_LENGTH} characters` });
+      return;
+    }
+
     for (const uri of redirect_uris) {
       if (typeof uri !== "string" || !isValidRedirectUri(uri)) {
         res.status(400).json({
           error: "invalid_request",
-          error_description: `Invalid redirect_uri: ${uri}. Must be https or http://localhost`,
+          error_description: "Invalid redirect_uri. Must be https or http://localhost, without a fragment.",
         });
         return;
       }
@@ -162,12 +180,13 @@ export function mountOAuthRoutes(app: express.Express): void {
 
     const clientId = randomUUID();
     const normalizedUris = redirect_uris.map(normalizeRedirectUri);
-    clients.set(clientId, { redirectUris: normalizedUris, name: client_name, createdAt: Date.now() });
-    console.log(`OAuth: registered client ${clientId} (${client_name ?? "unnamed"})`);
+    const sanitizedName = client_name?.replace(/[\r\n\x00-\x1f]/g, "") ?? undefined;
+    clients.set(clientId, { redirectUris: normalizedUris, name: sanitizedName, createdAt: Date.now() });
+    console.log(`OAuth: registered client ${clientId} (${sanitizedName ?? "unnamed"})`);
 
     res.status(201).json({
       client_id: clientId,
-      client_name,
+      client_name: sanitizedName,
       redirect_uris,
       grant_types: ["authorization_code"],
       response_types: ["code"],
@@ -177,18 +196,28 @@ export function mountOAuthRoutes(app: express.Express): void {
 
   // Authorization endpoint — redirects to Google OAuth
   app.get("/oauth/authorize", (req, res) => {
-    const {
-      client_id, redirect_uri, response_type, state,
-      code_challenge, code_challenge_method,
-    } = req.query as Record<string, string>;
+    const client_id = asString(req.query.client_id);
+    const redirect_uri = asString(req.query.redirect_uri);
+    const response_type = asString(req.query.response_type);
+    const state = asString(req.query.state);
+    const code_challenge = asString(req.query.code_challenge);
+    const code_challenge_method = asString(req.query.code_challenge_method);
 
     if (response_type !== "code") {
       res.status(400).json({ error: "unsupported_response_type" });
       return;
     }
+    if (!client_id) {
+      res.status(400).json({ error: "invalid_client" });
+      return;
+    }
     const client = clients.get(client_id);
     if (!client) {
       res.status(400).json({ error: "invalid_client" });
+      return;
+    }
+    if (!redirect_uri) {
+      res.status(400).json({ error: "invalid_request", error_description: "redirect_uri is required" });
       return;
     }
     let normalizedRedirectUri: string;
@@ -202,12 +231,16 @@ export function mountOAuthRoutes(app: express.Express): void {
       res.status(400).json({ error: "invalid_request", error_description: "redirect_uri not registered" });
       return;
     }
-    if (!code_challenge) {
-      res.status(400).json({ error: "invalid_request", error_description: "PKCE required" });
+    if (!code_challenge || code_challenge.length < 43 || code_challenge.length > 128) {
+      res.status(400).json({ error: "invalid_request", error_description: "PKCE code_challenge required (43-128 chars)" });
       return;
     }
     if (code_challenge_method && code_challenge_method !== "S256") {
-      res.status(400).json({ error: "unsupported_code_challenge_method", error_description: "Only S256 is supported" });
+      res.status(400).json({ error: "invalid_request", error_description: "Only S256 is supported" });
+      return;
+    }
+    if (state && state.length > MAX_STATE_LENGTH) {
+      res.status(400).json({ error: "invalid_request", error_description: "state too long" });
       return;
     }
 
@@ -221,7 +254,6 @@ export function mountOAuthRoutes(app: express.Express): void {
       clientId: client_id,
       redirectUri: normalizedRedirectUri,
       codeChallenge: code_challenge,
-      codeChallengeMethod: code_challenge_method ?? "S256",
       state,
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
@@ -240,10 +272,19 @@ export function mountOAuthRoutes(app: express.Express): void {
 
   // Google OAuth callback
   app.get("/oauth/callback", async (req, res) => {
-    const { code: googleCode, state: googleState, error } = req.query as Record<string, string>;
+    const googleCode = asString(req.query.code);
+    const googleState = asString(req.query.state);
+    const error = asString(req.query.error);
 
     if (error) {
-      res.status(400).json({ error: "Google OAuth error", details: String(error) });
+      // Consume the pending state to prevent replay
+      if (googleState) pendingAuths.delete(googleState);
+      res.status(400).json({ error: "access_denied", error_description: "Google OAuth authorization failed" });
+      return;
+    }
+
+    if (!googleState || !googleCode) {
+      res.status(400).json({ error: "invalid_request", error_description: "Missing code or state parameter" });
       return;
     }
 
@@ -259,6 +300,7 @@ export function mountOAuthRoutes(app: express.Express): void {
       const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        signal: AbortSignal.timeout(GOOGLE_FETCH_TIMEOUT_MS),
         body: new URLSearchParams({
           code: googleCode,
           client_id: config.googleClientId,
@@ -269,8 +311,7 @@ export function mountOAuthRoutes(app: express.Express): void {
       });
 
       if (!tokenResponse.ok) {
-        const err = await tokenResponse.text();
-        console.error(`OAuth: Google token exchange failed (${tokenResponse.status}): ${err}`);
+        console.error(`OAuth: Google token exchange failed (${tokenResponse.status})`);
         res.status(500).json({ error: "server_error", error_description: "Google token exchange failed" });
         return;
       }
@@ -296,7 +337,12 @@ export function mountOAuthRoutes(app: express.Express): void {
       }
       const payload = ticket.getPayload();
 
-      if (!payload?.email || !payload.email.endsWith("@maestra.io") || payload.hd !== "maestra.io") {
+      if (
+        !payload?.email ||
+        !payload.email.endsWith("@maestra.io") ||
+        payload.hd !== "maestra.io" ||
+        payload.email_verified !== true
+      ) {
         console.warn(`OAuth: rejected login from ${redactEmail(payload?.email ?? "unknown")} (not from maestra.io domain)`);
         res.status(403).json({ error: "access_denied", error_description: "Access restricted to @maestra.io accounts" });
         return;
@@ -310,11 +356,10 @@ export function mountOAuthRoutes(app: express.Express): void {
       }
 
       const ourCode = randomBytes(32).toString("hex");
-      authCodes.set(ourCode, {
+      authCodes.set(hashToken(ourCode), {
         clientId: pending.clientId,
         redirectUri: pending.redirectUri,
         codeChallenge: pending.codeChallenge,
-        codeChallengeMethod: pending.codeChallengeMethod,
         email: payload.email,
         expiresAt: Date.now() + 5 * 60 * 1000,
       });
@@ -324,67 +369,73 @@ export function mountOAuthRoutes(app: express.Express): void {
       if (pending.state) redirectUrl.searchParams.set("state", pending.state);
       res.redirect(redirectUrl.toString());
     } catch (err) {
-      console.error(`OAuth: callback error: ${err}`);
+      console.error("OAuth: callback error:", err instanceof Error ? err.message : String(err));
       res.status(500).json({ error: "server_error", error_description: "OAuth callback failed" });
     }
   });
 
   // Token endpoint — exchange auth code for access token (with PKCE)
   app.post("/oauth/token", (req, res) => {
-    const { grant_type, code, redirect_uri, client_id, code_verifier } = req.body ?? {};
-
-    console.log(`OAuth /token: grant_type=${grant_type} has_code=${typeof code === "string"} has_client_id=${typeof client_id === "string"}`);
+    const body = req.body ?? {};
+    const grant_type = asString(body.grant_type);
+    const code = asString(body.code);
+    const redirect_uri = asString(body.redirect_uri);
+    const client_id = asString(body.client_id);
+    const code_verifier = asString(body.code_verifier);
 
     if (grant_type !== "authorization_code") {
-      console.warn("OAuth /token: rejected unsupported grant_type");
       res.status(400).json({ error: "unsupported_grant_type" });
       return;
     }
 
-    const authCode = typeof code === "string" ? authCodes.get(code) : undefined;
+    if (!code) {
+      res.status(400).json({ error: "invalid_grant", error_description: "code is required" });
+      return;
+    }
+
+    const codeHash = hashToken(code);
+    const authCode = authCodes.get(codeHash);
     if (!authCode) {
-      console.warn("OAuth /token: invalid or expired code");
       res.status(400).json({ error: "invalid_grant", error_description: "Invalid or expired code" });
       return;
     }
 
-    let normalizedRedirectUri: string;
-    try {
-      normalizedRedirectUri = normalizeRedirectUri(redirect_uri);
-    } catch {
-      authCodes.delete(code);
-      res.status(400).json({ error: "invalid_grant", error_description: "Malformed redirect_uri" });
-      return;
-    }
-    if (authCode.clientId !== client_id || authCode.redirectUri !== normalizedRedirectUri) {
-      console.warn("OAuth /token: client/redirect mismatch");
-      authCodes.delete(code);
-      res.status(400).json({ error: "invalid_grant", error_description: "Client/redirect mismatch" });
-      return;
-    }
+    // Auth code is single-use per RFC 6749 §10.5 — delete immediately
+    authCodes.delete(codeHash);
 
     if (authCode.expiresAt < Date.now()) {
-      authCodes.delete(code);
       res.status(400).json({ error: "invalid_grant", error_description: "Code expired" });
       return;
     }
 
-    // Auth code is single-use per RFC 7636 §4.6 — delete before any PKCE checks
-    authCodes.delete(code);
-
-    if (authCode.codeChallenge && !code_verifier) {
-      res.status(400).json({ error: "invalid_grant", error_description: "code_verifier required (PKCE)" });
+    if (!redirect_uri) {
+      res.status(400).json({ error: "invalid_grant", error_description: "redirect_uri is required" });
+      return;
+    }
+    let normalizedRedirectUri: string;
+    try {
+      normalizedRedirectUri = normalizeRedirectUri(redirect_uri);
+    } catch {
+      res.status(400).json({ error: "invalid_grant", error_description: "Malformed redirect_uri" });
+      return;
+    }
+    if (authCode.clientId !== client_id || authCode.redirectUri !== normalizedRedirectUri) {
+      res.status(400).json({ error: "invalid_grant", error_description: "Client/redirect mismatch" });
       return;
     }
 
-    if (code_verifier) {
-      const expected = createHash("sha256").update(code_verifier).digest("base64url");
-      const expectedBuf = Buffer.from(expected);
-      const storedBuf = Buffer.from(authCode.codeChallenge);
-      if (expectedBuf.length !== storedBuf.length || !timingSafeEqual(expectedBuf, storedBuf)) {
-        res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
-        return;
-      }
+    // PKCE is mandatory
+    if (!code_verifier || code_verifier.length < 43 || code_verifier.length > 128) {
+      res.status(400).json({ error: "invalid_grant", error_description: "code_verifier required (43-128 chars per RFC 7636)" });
+      return;
+    }
+
+    const expected = createHash("sha256").update(code_verifier).digest("base64url");
+    const expectedBuf = Buffer.from(expected);
+    const storedBuf = Buffer.from(authCode.codeChallenge);
+    if (expectedBuf.length !== storedBuf.length || !timingSafeEqual(expectedBuf, storedBuf)) {
+      res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
+      return;
     }
 
     if (accessTokens.size >= MAX_ACCESS_TOKENS) {
@@ -401,7 +452,7 @@ export function mountOAuthRoutes(app: express.Express): void {
 
     console.log(`OAuth: issued token for ${redactEmail(authCode.email)}`);
 
-    res.json({
+    res.set("Cache-Control", "no-store").json({
       access_token: accessToken,
       token_type: "Bearer",
       expires_in: expiresIn,
