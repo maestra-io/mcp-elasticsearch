@@ -66,10 +66,17 @@ export function stopOAuthCleanup() {
 
 // --- Helpers ---
 
+/** Redact email for logging: "j****@maestra.io" */
+function redactEmail(email: string): string {
+  const [local, domain] = email.split("@");
+  if (!local || !domain) return "****";
+  return `${local[0]}****@${domain}`;
+}
+
 /** Canonicalize a URI for safe comparison (lowercases scheme+host, resolves path) */
 export function normalizeRedirectUri(uri: string): string {
   const url = new URL(uri);
-  // Reconstruct with normalized components — URL constructor resolves path traversals
+  if (url.hash) throw new Error("redirect_uri must not contain a fragment");
   return `${url.protocol}//${url.hostname}${url.port ? ":" + url.port : ""}${url.pathname}${url.search}`;
 }
 
@@ -290,12 +297,12 @@ export function mountOAuthRoutes(app: express.Express): void {
       const payload = ticket.getPayload();
 
       if (!payload?.email || !payload.email.endsWith("@maestra.io") || payload.hd !== "maestra.io") {
-        console.warn(`OAuth: rejected login from ${payload?.email ?? "unknown"} (not from maestra.io domain)`);
+        console.warn(`OAuth: rejected login from ${redactEmail(payload?.email ?? "unknown")} (not from maestra.io domain)`);
         res.status(403).json({ error: "access_denied", error_description: "Access restricted to @maestra.io accounts" });
         return;
       }
 
-      console.log(`OAuth: authorized ${payload.email}`);
+      console.log(`OAuth: authorized ${redactEmail(payload.email)}`);
 
       if (authCodes.size >= MAX_AUTH_CODES) {
         res.status(503).json({ error: "server_error", error_description: "Too many pending auth codes" });
@@ -392,7 +399,7 @@ export function mountOAuthRoutes(app: express.Express): void {
       expiresAt: Date.now() + expiresIn * 1000,
     });
 
-    console.log(`OAuth: issued token for ${authCode.email}`);
+    console.log(`OAuth: issued token for ${redactEmail(authCode.email)}`);
 
     res.json({
       access_token: accessToken,
