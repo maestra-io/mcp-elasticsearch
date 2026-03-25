@@ -63,6 +63,13 @@ import { config } from "./config.js";
 //     as S256. A client that intends "plain" would fail PKCE verification — which is
 //     the correct outcome since plain is not supported.
 //
+// 12. Token endpoint does not re-validate client_id against the clients registry:
+//     The token endpoint checks client_id === authCode.clientId (string match against
+//     the value stored at authorize time) but does not look up the clients Map. This is
+//     intentional: auth codes live 5 minutes while client registrations live 24 hours,
+//     so a client cannot expire between authorize and token exchange. The auth code
+//     itself is the binding — re-checking the registry would add no security value.
+//
 // ──────────────────────────────────────────────────────────────────────────────
 
 let _googleOAuthClient: OAuth2Client | undefined;
@@ -362,6 +369,8 @@ export function mountOAuthRoutes(app: express.Express): void {
     }
 
     if (!googleState || !googleCode) {
+      // Consume state if present to prevent dangling entries
+      if (googleState) pendingAuths.delete(googleState);
       res.status(400).json({ error: "invalid_request", error_description: "Missing code or state parameter" });
       return;
     }
@@ -411,7 +420,7 @@ export function mountOAuthRoutes(app: express.Express): void {
           audience: config.googleClientId,
         });
       } catch (err) {
-        console.warn("OAuth: id_token verification failed", err);
+        console.warn("OAuth: id_token verification failed:", err instanceof Error ? err.message : String(err));
         res.status(400).json({ error: "invalid_request", error_description: "id_token verification failed" });
         return;
       }
@@ -449,7 +458,8 @@ export function mountOAuthRoutes(app: express.Express): void {
       const redirectUrl = new URL(pending.redirectUri);
       redirectUrl.searchParams.set("code", ourCode);
       if (pending.state) redirectUrl.searchParams.set("state", pending.state);
-      res.redirect(redirectUrl.toString());
+      // Prevent auth code leakage via Referer header on the redirect target
+      res.set("Referrer-Policy", "no-referrer").redirect(redirectUrl.toString());
     } catch (err) {
       console.error("OAuth: callback error:", err instanceof Error ? err.message : String(err));
       res.status(500).json({ error: "server_error", error_description: "OAuth callback failed" });
@@ -491,6 +501,10 @@ export function mountOAuthRoutes(app: express.Express): void {
       return;
     }
 
+    if (!client_id) {
+      res.status(400).json({ error: "invalid_client", error_description: "client_id is required" });
+      return;
+    }
     if (!redirect_uri) {
       res.status(400).json({ error: "invalid_grant", error_description: "redirect_uri is required" });
       return;
