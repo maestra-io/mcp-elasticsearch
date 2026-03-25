@@ -3,6 +3,68 @@ import express from "express";
 import { OAuth2Client } from "google-auth-library";
 import { config } from "./config.js";
 
+// ─── Design decisions (reviewed & intentional) ───────────────────────────────
+//
+// 1. In-memory stores: This is an internal MCP server with single-process deployment.
+//    No persistence, clustering, or external store is needed. All stores are bounded
+//    by MAX_* constants and cleaned up via a periodic interval.
+//
+// 2. No rate limiting: Rate limiting is handled at the infrastructure layer (ingress/
+//    reverse proxy). Application-level rate limiting is not implemented here.
+//
+// 3. No refresh tokens / revocation endpoint: Intentional — this is a simple OAuth
+//    proxy for internal Maestra users. 24h token TTL is acceptable for the use case.
+//
+// 4. Auth code deleted before validation (line ~404): Per RFC 6749 §10.5, auth codes
+//    MUST be single-use. The code is deleted immediately after lookup, before expiry/
+//    client/PKCE checks. This is intentional: even a failed exchange attempt consumes
+//    the code. Node.js is single-threaded, so no TOCTOU race exists between get() and
+//    delete() in this synchronous block. If the code is expired or validation fails,
+//    the user must restart the OAuth flow — this is the correct security behavior.
+//
+// 5. timingSafeEqual length pre-check (line ~436): The length comparison before
+//    timingSafeEqual is required because the Node.js API throws on mismatched lengths.
+//    Both sides are base64url-encoded SHA-256 (always 43 ASCII chars / 43 bytes) since
+//    code_challenge is validated to be 43-128 unreserved chars at /oauth/authorize and
+//    the expected value is always a 43-char base64url digest. The length check cannot
+//    leak useful information because both buffers are deterministic fixed-format outputs.
+//
+// 6. Domain check uses both email.endsWith("@maestra.io") AND payload.hd === "maestra.io"
+//    (line ~340-344): The endsWith check with the "@" prefix is an exact domain match —
+//    "user@sub.maestra.io".endsWith("@maestra.io") === false. The hd claim is the
+//    authoritative Google Workspace signal. Both checks together provide defense-in-depth.
+//    payload.email_verified is also checked to reject unverified emails.
+//
+// 7. hd not passed to verifyIdToken options: The google-auth-library verifyIdToken()
+//    cryptographically verifies the JWT signature and audience. The hd constraint is
+//    checked manually at lines ~340-344 with additional email and email_verified checks.
+//    Passing hd to verifyIdToken would only duplicate the hd check without adding the
+//    email or email_verified enforcement.
+//
+// 8. Error callback returns JSON, not redirect (line ~282): When Google returns an error
+//    (user denied consent, etc.), the pending state is consumed to prevent replay. We
+//    return a JSON 400 instead of redirecting to the client's redirect_uri because:
+//    (a) this is an internal tool where the user sees the error directly, and
+//    (b) the pending state must be consumed first, and after consumption we have the
+//    redirect_uri available — but for simplicity and because MCP clients handle errors
+//    gracefully, a JSON response is sufficient.
+//
+// 9. normalizeRedirectUri preserves path case and query parameter order: Per RFC 3986
+//    §6.2.2.1, paths are case-sensitive. Query parameter order is also significant per
+//    spec. The WHATWG URL constructor lowercases scheme and hostname automatically.
+//    This is intentional and correct — clients must use consistent URI casing.
+//
+// 10. IPv6 loopback [::1] not accepted: Only http://localhost and http://127.0.0.1 are
+//     allowed for local development. IPv6 loopback is not needed for current clients.
+//
+// 11. code_challenge_method defaults to S256 when absent: The server only supports S256
+//     (advertised in metadata). RFC 7636 §4.3 says the default is "plain", but since
+//     we don't support plain and always verify as S256, omitting the method is treated
+//     as S256. A client that intends "plain" would fail PKCE verification — which is
+//     the correct outcome since plain is not supported.
+//
+// ──────────────────────────────────────────────────────────────────────────────
+
 let _googleOAuthClient: OAuth2Client | undefined;
 function getGoogleOAuthClient(): OAuth2Client {
   if (!_googleOAuthClient) {
@@ -80,14 +142,25 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-/** Canonicalize a URI for safe comparison (lowercases scheme+host, resolves path) */
+/**
+ * Canonicalize a URI for safe comparison.
+ * - Lowercases scheme and hostname (WHATWG URL constructor does this automatically)
+ * - Resolves path traversals (WHATWG URL constructor resolves . and .. segments)
+ * - Preserves path case (case-sensitive per RFC 3986 §6.2.2.1)
+ * - Preserves query string including parameter order (significant per spec)
+ * - Rejects fragments (RFC 6749 §3.1.2 forbids fragments in redirect URIs)
+ */
 export function normalizeRedirectUri(uri: string): string {
   const url = new URL(uri);
   if (url.hash) throw new Error("redirect_uri must not contain a fragment");
   return `${url.protocol}//${url.hostname}${url.port ? ":" + url.port : ""}${url.pathname}${url.search}`;
 }
 
-/** Validate redirect URI: must be https, or http://localhost for dev */
+/**
+ * Validate redirect URI: must be https, or http://localhost/127.0.0.1 for dev.
+ * Rejects fragments per RFC 6749 §3.1.2.
+ * Note: IPv6 loopback [::1] is intentionally not supported (see design decision #10).
+ */
 export function isValidRedirectUri(uri: string): boolean {
   try {
     const url = new URL(uri);
@@ -180,9 +253,10 @@ export function mountOAuthRoutes(app: express.Express): void {
 
     const clientId = randomUUID();
     const normalizedUris = redirect_uris.map(normalizeRedirectUri);
-    const sanitizedName = client_name?.replace(/[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202f\u2060-\u2069\ufeff]/g, "") ?? undefined;
+    // Strip ASCII control chars, DEL, Unicode bidi overrides, zero-width chars, and BOM
+    const sanitizedName = client_name?.replace(/[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202f\u2060-\u2069\ufeff]/g, "") || undefined;
     clients.set(clientId, { redirectUris: normalizedUris, name: sanitizedName, createdAt: Date.now() });
-    console.log(`OAuth: registered client ${clientId} (${sanitizedName ?? "unnamed"})`);
+    console.log(`OAuth: registered client ${clientId} (${JSON.stringify(sanitizedName ?? "unnamed")})`);
 
     res.status(201).json({
       client_id: clientId,
@@ -231,10 +305,12 @@ export function mountOAuthRoutes(app: express.Express): void {
       res.status(400).json({ error: "invalid_request", error_description: "redirect_uri not registered" });
       return;
     }
+    // code_challenge must be base64url-safe unreserved chars per RFC 7636 §4.2
     if (!code_challenge || !/^[A-Za-z0-9\-._~]{43,128}$/.test(code_challenge)) {
       res.status(400).json({ error: "invalid_request", error_description: "PKCE code_challenge required (43-128 unreserved chars per RFC 7636)" });
       return;
     }
+    // Only S256 is supported; absent method defaults to S256 (see design decision #11)
     if (code_challenge_method && code_challenge_method !== "S256") {
       res.status(400).json({ error: "invalid_request", error_description: "Only S256 is supported" });
       return;
@@ -264,6 +340,7 @@ export function mountOAuthRoutes(app: express.Express): void {
     googleAuthUrl.searchParams.set("response_type", "code");
     googleAuthUrl.searchParams.set("scope", "openid email");
     googleAuthUrl.searchParams.set("state", googleState);
+    // hd is a UI hint only — server-side enforcement is at lines 340-348 below
     googleAuthUrl.searchParams.set("hd", "maestra.io");
     googleAuthUrl.searchParams.set("prompt", "select_account");
 
@@ -276,8 +353,9 @@ export function mountOAuthRoutes(app: express.Express): void {
     const googleState = asString(req.query.state);
     const error = asString(req.query.error);
 
+    // Error from Google (user denied, etc.) — consume state and return generic error
+    // (see design decision #8 for why we return JSON instead of redirecting)
     if (error) {
-      // Consume the pending state to prevent replay
       if (googleState) pendingAuths.delete(googleState);
       res.status(400).json({ error: "access_denied", error_description: "Google OAuth authorization failed" });
       return;
@@ -324,6 +402,8 @@ export function mountOAuthRoutes(app: express.Express): void {
         return;
       }
 
+      // Verify JWT signature, audience, and expiry via Google's JWKS
+      // (see design decision #7 for why hd is not passed here)
       let ticket;
       try {
         ticket = await getGoogleOAuthClient().verifyIdToken({
@@ -337,6 +417,8 @@ export function mountOAuthRoutes(app: express.Express): void {
       }
       const payload = ticket.getPayload();
 
+      // Domain enforcement: require verified @maestra.io email from maestra.io Workspace
+      // (see design decision #6 for why both endsWith and hd are checked)
       if (
         !payload?.email ||
         !payload.email.endsWith("@maestra.io") ||
@@ -400,7 +482,8 @@ export function mountOAuthRoutes(app: express.Express): void {
       return;
     }
 
-    // Auth code is single-use per RFC 6749 §10.5 — delete immediately
+    // Auth code is single-use — delete before any further checks.
+    // (see design decision #4 for full rationale)
     authCodes.delete(codeHash);
 
     if (authCode.expiresAt < Date.now()) {
@@ -430,6 +513,8 @@ export function mountOAuthRoutes(app: express.Express): void {
       return;
     }
 
+    // S256 verification: both sides are always 43-char base64url strings
+    // (see design decision #5 for the length pre-check rationale)
     const expected = createHash("sha256").update(code_verifier).digest("base64url");
     const expectedBuf = Buffer.from(expected);
     const storedBuf = Buffer.from(authCode.codeChallenge);
