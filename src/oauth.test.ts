@@ -15,7 +15,7 @@ vi.mock("./config.js", () => ({
   },
 }));
 
-const { isValidRedirectUri, validateOAuthToken, mountOAuthRoutes } = await import("./oauth.js");
+const { isValidRedirectUri, normalizeRedirectUri, validateOAuthToken, mountOAuthRoutes } = await import("./oauth.js");
 
 describe("isValidRedirectUri", () => {
   it("accepts https URIs", () => {
@@ -42,6 +42,28 @@ describe("isValidRedirectUri", () => {
     expect(isValidRedirectUri("not-a-url")).toBe(false);
     expect(isValidRedirectUri("")).toBe(false);
     expect(isValidRedirectUri("ftp://example.com/file")).toBe(false);
+  });
+});
+
+describe("normalizeRedirectUri", () => {
+  it("lowercases scheme and hostname", () => {
+    expect(normalizeRedirectUri("HTTPS://Example.COM/callback")).toBe("https://example.com/callback");
+  });
+
+  it("resolves path traversals", () => {
+    expect(normalizeRedirectUri("https://example.com/a/../b")).toBe("https://example.com/b");
+  });
+
+  it("preserves port when present", () => {
+    expect(normalizeRedirectUri("http://localhost:3000/callback")).toBe("http://localhost:3000/callback");
+  });
+
+  it("strips query and fragment", () => {
+    expect(normalizeRedirectUri("https://example.com/cb?foo=bar#hash")).toBe("https://example.com/cb");
+  });
+
+  it("throws on malformed input", () => {
+    expect(() => normalizeRedirectUri("not-a-url")).toThrow();
   });
 });
 

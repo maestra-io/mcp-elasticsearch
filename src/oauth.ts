@@ -1,6 +1,9 @@
 import { randomUUID, randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import express from "express";
+import { OAuth2Client } from "google-auth-library";
 import { config } from "./config.js";
+
+const googleOAuthClient = new OAuth2Client(config.googleClientId);
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -55,6 +58,13 @@ export function stopOAuthCleanup() {
 }
 
 // --- Helpers ---
+
+/** Canonicalize a URI for safe comparison (lowercases scheme+host, resolves path) */
+export function normalizeRedirectUri(uri: string): string {
+  const url = new URL(uri);
+  // Reconstruct with normalized components — URL constructor resolves path traversals
+  return `${url.protocol}//${url.hostname}${url.port ? ":" + url.port : ""}${url.pathname}`;
+}
 
 /** Validate redirect URI: must be https, or http://localhost for dev */
 export function isValidRedirectUri(uri: string): boolean {
@@ -137,7 +147,8 @@ export function mountOAuthRoutes(app: express.Express): void {
     }
 
     const clientId = randomUUID();
-    clients.set(clientId, { redirectUris: redirect_uris, name: client_name, createdAt: Date.now() });
+    const normalizedUris = redirect_uris.map((u: string) => normalizeRedirectUri(u));
+    clients.set(clientId, { redirectUris: normalizedUris, name: client_name, createdAt: Date.now() });
     console.log(`OAuth: registered client ${clientId} (${client_name ?? "unnamed"})`);
 
     res.status(201).json({
@@ -166,7 +177,14 @@ export function mountOAuthRoutes(app: express.Express): void {
       res.status(400).json({ error: "invalid_client" });
       return;
     }
-    if (!client.redirectUris.includes(redirect_uri)) {
+    let normalizedRedirectUri: string;
+    try {
+      normalizedRedirectUri = normalizeRedirectUri(redirect_uri);
+    } catch {
+      res.status(400).json({ error: "invalid_request", error_description: "Malformed redirect_uri" });
+      return;
+    }
+    if (!client.redirectUris.includes(normalizedRedirectUri)) {
       res.status(400).json({ error: "invalid_request", error_description: "redirect_uri not registered" });
       return;
     }
@@ -187,7 +205,7 @@ export function mountOAuthRoutes(app: express.Express): void {
     const googleState = randomBytes(32).toString("hex");
     pendingAuths.set(googleState, {
       clientId: client_id,
-      redirectUri: redirect_uri,
+      redirectUri: normalizedRedirectUri,
       codeChallenge: code_challenge,
       codeChallengeMethod: code_challenge_method ?? "S256",
       state,
@@ -251,17 +269,14 @@ export function mountOAuthRoutes(app: express.Express): void {
         return;
       }
 
-      const payload = JSON.parse(
-        Buffer.from(tokenData.id_token.split(".")[1], "base64url").toString(),
-      ) as { email?: string; hd?: string; aud?: string };
+      const ticket = await googleOAuthClient.verifyIdToken({
+        idToken: tokenData.id_token,
+        audience: config.googleClientId,
+      });
+      const payload = ticket.getPayload();
 
-      if (payload.aud !== config.googleClientId) {
-        res.status(400).json({ error: "invalid_request", error_description: "Invalid token audience" });
-        return;
-      }
-
-      if (!payload.email || !payload.email.endsWith("@maestra.io")) {
-        console.warn(`OAuth: rejected login from ${payload.email} (not @maestra.io)`);
+      if (!payload?.email || !payload.email.endsWith("@maestra.io") || payload.hd !== "maestra.io") {
+        console.warn(`OAuth: rejected login from ${payload?.email ?? "unknown"} (not @maestra.io)`);
         res.status(403).json({ error: "access_denied", error_description: "Access restricted to @maestra.io accounts" });
         return;
       }
@@ -312,7 +327,15 @@ export function mountOAuthRoutes(app: express.Express): void {
       return;
     }
 
-    if (authCode.clientId !== client_id || authCode.redirectUri !== redirect_uri) {
+    let normalizedRedirectUri: string;
+    try {
+      normalizedRedirectUri = normalizeRedirectUri(redirect_uri);
+    } catch {
+      authCodes.delete(code);
+      res.status(400).json({ error: "invalid_grant", error_description: "Malformed redirect_uri" });
+      return;
+    }
+    if (authCode.clientId !== client_id || authCode.redirectUri !== normalizedRedirectUri) {
       console.warn("OAuth /token: client/redirect mismatch");
       authCodes.delete(code);
       res.status(400).json({ error: "invalid_grant", error_description: "Client/redirect mismatch" });
@@ -330,6 +353,9 @@ export function mountOAuthRoutes(app: express.Express): void {
       return;
     }
 
+    // Auth code is single-use per RFC 7636 §4.6 — delete before PKCE check
+    authCodes.delete(code);
+
     if (code_verifier) {
       const expected = createHash("sha256").update(code_verifier).digest("base64url");
       const expectedBuf = Buffer.from(expected);
@@ -339,8 +365,6 @@ export function mountOAuthRoutes(app: express.Express): void {
         return;
       }
     }
-
-    authCodes.delete(code);
 
     if (accessTokens.size >= MAX_ACCESS_TOKENS) {
       res.status(503).json({ error: "server_error", error_description: "Too many active tokens" });
