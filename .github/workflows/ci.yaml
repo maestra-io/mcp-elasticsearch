@@ -13,6 +13,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Configure git for private npm deps
+        run: git config --global url."https://x-access-token:${{ secrets.GH_PKG_TOKEN }}@github.com/".insteadOf "ssh://git@github.com/"
       - run: npm ci
       - run: npm run build
       - run: npm test
