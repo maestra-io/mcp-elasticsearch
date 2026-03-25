@@ -58,8 +58,9 @@ describe("normalizeRedirectUri", () => {
     expect(normalizeRedirectUri("http://localhost:3000/callback")).toBe("http://localhost:3000/callback");
   });
 
-  it("strips query and fragment", () => {
-    expect(normalizeRedirectUri("https://example.com/cb?foo=bar#hash")).toBe("https://example.com/cb");
+  it("preserves query string but strips fragment", () => {
+    expect(normalizeRedirectUri("https://example.com/cb?foo=bar#hash")).toBe("https://example.com/cb?foo=bar");
+    expect(normalizeRedirectUri("https://example.com/cb#hash")).toBe("https://example.com/cb");
   });
 
   it("resolves URL-encoded path traversals", () => {

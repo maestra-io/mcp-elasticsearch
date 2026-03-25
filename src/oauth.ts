@@ -63,7 +63,7 @@ export function stopOAuthCleanup() {
 export function normalizeRedirectUri(uri: string): string {
   const url = new URL(uri);
   // Reconstruct with normalized components — URL constructor resolves path traversals
-  return `${url.protocol}//${url.hostname}${url.port ? ":" + url.port : ""}${url.pathname}`;
+  return `${url.protocol}//${url.hostname}${url.port ? ":" + url.port : ""}${url.pathname}${url.search}`;
 }
 
 /** Validate redirect URI: must be https, or http://localhost for dev */
