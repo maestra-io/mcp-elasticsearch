@@ -4,6 +4,9 @@ on:
   push:
     branches: [master, main]
 
+permissions:
+  packages: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -13,8 +16,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Configure git for private npm deps
-        run: git config --global url."https://x-access-token:${{ secrets.GH_PKG_TOKEN }}@github.com/".insteadOf "ssh://git@github.com/"
+          registry-url: https://npm.pkg.github.com
       - run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: npm run build
       - run: npm test
