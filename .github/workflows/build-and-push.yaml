@@ -83,8 +83,8 @@ jobs:
       - name: Build and push
         run: |
           TAG=${{ steps.release-number.outputs.release-number }}
-          docker build -t ${{ env.ECR_REGISTRY }}/mcp-elasticsearch:$TAG .
-          docker build -t ${{ env.ECR_REGISTRY }}/mcp-elasticsearch:latest .
+          docker build --build-arg NPM_TOKEN=${{ secrets.GITHUB_TOKEN }} -t ${{ env.ECR_REGISTRY }}/mcp-elasticsearch:$TAG .
+          docker tag ${{ env.ECR_REGISTRY }}/mcp-elasticsearch:$TAG ${{ env.ECR_REGISTRY }}/mcp-elasticsearch:latest
           docker push ${{ env.ECR_REGISTRY }}/mcp-elasticsearch:$TAG
           docker push ${{ env.ECR_REGISTRY }}/mcp-elasticsearch:latest
       - name: Create GitHub release
