@@ -180,14 +180,14 @@ export function mountOAuthRoutes(app: express.Express): void {
 
     const clientId = randomUUID();
     const normalizedUris = redirect_uris.map(normalizeRedirectUri);
-    const sanitizedName = client_name?.replace(/[\r\n\x00-\x1f]/g, "") ?? undefined;
+    const sanitizedName = client_name?.replace(/[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202f\u2060-\u2069\ufeff]/g, "") ?? undefined;
     clients.set(clientId, { redirectUris: normalizedUris, name: sanitizedName, createdAt: Date.now() });
     console.log(`OAuth: registered client ${clientId} (${sanitizedName ?? "unnamed"})`);
 
     res.status(201).json({
       client_id: clientId,
       client_name: sanitizedName,
-      redirect_uris,
+      redirect_uris: normalizedUris,
       grant_types: ["authorization_code"],
       response_types: ["code"],
       token_endpoint_auth_method: "none",
@@ -231,8 +231,8 @@ export function mountOAuthRoutes(app: express.Express): void {
       res.status(400).json({ error: "invalid_request", error_description: "redirect_uri not registered" });
       return;
     }
-    if (!code_challenge || code_challenge.length < 43 || code_challenge.length > 128) {
-      res.status(400).json({ error: "invalid_request", error_description: "PKCE code_challenge required (43-128 chars)" });
+    if (!code_challenge || !/^[A-Za-z0-9\-._~]{43,128}$/.test(code_challenge)) {
+      res.status(400).json({ error: "invalid_request", error_description: "PKCE code_challenge required (43-128 unreserved chars per RFC 7636)" });
       return;
     }
     if (code_challenge_method && code_challenge_method !== "S256") {
@@ -424,9 +424,9 @@ export function mountOAuthRoutes(app: express.Express): void {
       return;
     }
 
-    // PKCE is mandatory
-    if (!code_verifier || code_verifier.length < 43 || code_verifier.length > 128) {
-      res.status(400).json({ error: "invalid_grant", error_description: "code_verifier required (43-128 chars per RFC 7636)" });
+    // PKCE is mandatory — validate charset per RFC 7636 §4.1
+    if (!code_verifier || !/^[A-Za-z0-9\-._~]{43,128}$/.test(code_verifier)) {
+      res.status(400).json({ error: "invalid_grant", error_description: "code_verifier required (43-128 unreserved chars per RFC 7636)" });
       return;
     }
 
@@ -452,7 +452,7 @@ export function mountOAuthRoutes(app: express.Express): void {
 
     console.log(`OAuth: issued token for ${redactEmail(authCode.email)}`);
 
-    res.set("Cache-Control", "no-store").json({
+    res.set("Cache-Control", "no-store").set("Pragma", "no-cache").json({
       access_token: accessToken,
       token_type: "Bearer",
       expires_in: expiresIn,
