@@ -311,7 +311,7 @@ describe("mountOAuthRoutes", () => {
     it("returns error for invalid/expired state", async () => {
       const res = mockRes();
       await routes["GET:/oauth/callback"].handler(
-        { query: { code: "google-code", state: "invalid-state" } },
+        { query: { code: "google-code", state: "a".repeat(64) } },
         res,
       );
       expect(res.status).toHaveBeenCalledWith(400);

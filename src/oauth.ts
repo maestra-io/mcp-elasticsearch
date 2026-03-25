@@ -63,7 +63,28 @@ import { config } from "./config.js";
 //     as S256. A client that intends "plain" would fail PKCE verification — which is
 //     the correct outcome since plain is not supported.
 //
-// 12. Token endpoint does not re-validate client_id against the clients registry:
+// 12. tokenResponse.json() body size: The fetch to oauth2.googleapis.com/token has a
+//     15-second AbortSignal timeout. The response body is not size-capped because:
+//     (a) the endpoint is hardcoded HTTPS to Google's domain (no SSRF possible),
+//     (b) the timeout bounds total elapsed time including body transfer, and
+//     (c) Google's token responses are consistently small JSON objects.
+//
+// 13. Expiry boundary consistency: Cleanup uses `v.expiresAt < now` and the token
+//     endpoint uses `authCode.expiresAt < Date.now()` (expired = strictly before now).
+//     validateOAuthToken uses `Date.now() < data.expiresAt` (valid = strictly before
+//     expiry). At the exact millisecond boundary, a token is rejected and an auth code
+//     is rejected — both are consistent in rejecting at the boundary. The off-by-one
+//     between cleanup (`<`) and validation (`<`) means an entry at exactly expiresAt is
+//     not cleaned up until the next interval but is already rejected by validation.
+//     This is harmless (one extra entry for up to 10 minutes, already rejected on use).
+//
+// 14. Store exhaustion after successful Google auth (MAX_AUTH_CODES full): If the
+//     authCodes store is full when a user completes Google login, the pendingAuths
+//     entry is already consumed and the user gets a 503. This is acceptable: the user
+//     must restart the flow. The alternative (checking capacity before the Google
+//     exchange) would waste a pendingAuths slot on a speculative capacity reservation.
+//
+// 15. Token endpoint does not re-validate client_id against the clients registry:
 //     The token endpoint checks client_id === authCode.clientId (string match against
 //     the value stored at authorize time) but does not look up the clients Map. This is
 //     intentional: auth codes live 5 minutes while client registrations live 24 hours,
@@ -172,6 +193,7 @@ export function isValidRedirectUri(uri: string): boolean {
   try {
     const url = new URL(uri);
     if (url.hash) return false;
+    if (url.username || url.password) return false;
     if (url.protocol === "https:") return true;
     if (url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1")) return true;
     return false;
@@ -244,7 +266,7 @@ export function mountOAuthRoutes(app: express.Express): void {
     }
 
     for (const uri of redirect_uris) {
-      if (typeof uri !== "string" || !isValidRedirectUri(uri)) {
+      if (typeof uri !== "string" || uri.length > 2048 || !isValidRedirectUri(uri)) {
         res.status(400).json({
           error: "invalid_request",
           error_description: "Invalid redirect_uri. Must be https or http://localhost, without a fragment.",
@@ -368,7 +390,7 @@ export function mountOAuthRoutes(app: express.Express): void {
       return;
     }
 
-    if (!googleState || !googleCode) {
+    if (!googleState || !googleCode || googleCode.length > 512 || googleState.length !== 64) {
       // Consume state if present to prevent dangling entries
       if (googleState) pendingAuths.delete(googleState);
       res.status(400).json({ error: "invalid_request", error_description: "Missing code or state parameter" });
@@ -458,8 +480,8 @@ export function mountOAuthRoutes(app: express.Express): void {
       const redirectUrl = new URL(pending.redirectUri);
       redirectUrl.searchParams.set("code", ourCode);
       if (pending.state) redirectUrl.searchParams.set("state", pending.state);
-      // Prevent auth code leakage via Referer header on the redirect target
-      res.set("Referrer-Policy", "no-referrer").redirect(redirectUrl.toString());
+      // Prevent auth code leakage via Referer header and caching
+      res.set("Referrer-Policy", "no-referrer").set("Cache-Control", "no-store").redirect(redirectUrl.toString());
     } catch (err) {
       console.error("OAuth: callback error:", err instanceof Error ? err.message : String(err));
       res.status(500).json({ error: "server_error", error_description: "OAuth callback failed" });
@@ -480,7 +502,7 @@ export function mountOAuthRoutes(app: express.Express): void {
       return;
     }
 
-    if (!code) {
+    if (!code || code.length > 256) {
       res.status(400).json({ error: "invalid_grant", error_description: "code is required" });
       return;
     }
@@ -505,7 +527,7 @@ export function mountOAuthRoutes(app: express.Express): void {
       res.status(400).json({ error: "invalid_client", error_description: "client_id is required" });
       return;
     }
-    if (!redirect_uri) {
+    if (!redirect_uri || redirect_uri.length > 2048) {
       res.status(400).json({ error: "invalid_grant", error_description: "redirect_uri is required" });
       return;
     }
