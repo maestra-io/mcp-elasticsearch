@@ -15,7 +15,7 @@ vi.mock("./config.js", () => ({
   },
 }));
 
-const { isValidRedirectUri, validateOAuthToken, mountOAuthRoutes } = await import("./oauth.js");
+const { isValidRedirectUri, normalizeRedirectUri, validateOAuthToken, mountOAuthRoutes } = await import("./oauth.js");
 
 describe("isValidRedirectUri", () => {
   it("accepts https URIs", () => {
@@ -42,6 +42,42 @@ describe("isValidRedirectUri", () => {
     expect(isValidRedirectUri("not-a-url")).toBe(false);
     expect(isValidRedirectUri("")).toBe(false);
     expect(isValidRedirectUri("ftp://example.com/file")).toBe(false);
+  });
+});
+
+describe("normalizeRedirectUri", () => {
+  it("lowercases scheme and hostname", () => {
+    expect(normalizeRedirectUri("HTTPS://Example.COM/callback")).toBe("https://example.com/callback");
+  });
+
+  it("resolves path traversals", () => {
+    expect(normalizeRedirectUri("https://example.com/a/../b")).toBe("https://example.com/b");
+  });
+
+  it("preserves port when present", () => {
+    expect(normalizeRedirectUri("http://localhost:3000/callback")).toBe("http://localhost:3000/callback");
+  });
+
+  it("preserves query string", () => {
+    expect(normalizeRedirectUri("https://example.com/cb?foo=bar")).toBe("https://example.com/cb?foo=bar");
+  });
+
+  it("rejects URIs with fragments", () => {
+    expect(() => normalizeRedirectUri("https://example.com/cb#hash")).toThrow("fragment");
+    expect(() => normalizeRedirectUri("https://example.com/cb?foo=bar#hash")).toThrow("fragment");
+  });
+
+  it("resolves URL-encoded path traversals", () => {
+    expect(normalizeRedirectUri("https://example.com/a/%2e%2e/b")).toBe("https://example.com/b");
+  });
+
+  it("strips default ports (443 for https, 80 for http)", () => {
+    expect(normalizeRedirectUri("https://example.com:443/callback")).toBe("https://example.com/callback");
+    expect(normalizeRedirectUri("http://localhost:80/callback")).toBe("http://localhost/callback");
+  });
+
+  it("throws on malformed input", () => {
+    expect(() => normalizeRedirectUri("not-a-url")).toThrow();
   });
 });
 
@@ -205,7 +241,7 @@ describe("mountOAuthRoutes", () => {
             response_type: "code",
             client_id: clientId,
             redirect_uri: "https://other.com/callback",
-            code_challenge: "challenge",
+            code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
           },
         },
         res,
@@ -231,7 +267,7 @@ describe("mountOAuthRoutes", () => {
       );
       expect(res.status).toHaveBeenCalledWith(400);
       expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({ error_description: "PKCE required" }),
+        expect.objectContaining({ error_description: expect.stringContaining("PKCE code_challenge") }),
       );
     });
 
@@ -244,7 +280,7 @@ describe("mountOAuthRoutes", () => {
             response_type: "code",
             client_id: clientId,
             redirect_uri: "https://app.example.com/callback",
-            code_challenge: "test-challenge",
+            code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
             code_challenge_method: "S256",
             state: "client-state",
           },
@@ -269,13 +305,13 @@ describe("mountOAuthRoutes", () => {
         res,
       );
       expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({ error: "Google OAuth error", details: "access_denied" });
+      expect(res.json).toHaveBeenCalledWith({ error: "access_denied", error_description: "Google OAuth authorization failed" });
     });
 
     it("returns error for invalid/expired state", async () => {
       const res = mockRes();
       await routes["GET:/oauth/callback"].handler(
-        { query: { code: "google-code", state: "invalid-state" } },
+        { query: { code: "google-code", state: "a".repeat(64) } },
         res,
       );
       expect(res.status).toHaveBeenCalledWith(400);
