@@ -84,7 +84,18 @@ import { config } from "./config.js";
 //     must restart the flow. The alternative (checking capacity before the Google
 //     exchange) would waste a pendingAuths slot on a speculative capacity reservation.
 //
-// 15. Token endpoint does not re-validate client_id against the clients registry:
+// 15. pendingAuths expiry boundary: `Date.now() > pending.expiresAt` uses the same
+//     "accept at boundary" semantics as authCodes (`authCode.expiresAt < Date.now()`).
+//     Both are equivalent (`a < b` ↔ `b > a`). At the exact millisecond boundary both
+//     accept the entry as valid. This is consistent and harmless (1ms window).
+//
+// 16. Error-callback pendingAuths deletion: When Google returns `?error=...`, the pending
+//     state is deleted to prevent replay. The googleState value is 256-bit random (64 hex
+//     chars), making it computationally infeasible to guess. An attacker who can observe
+//     the state (e.g. via network sniffing) could cancel a flow, but they already have
+//     enough access to intercept the callback entirely. This is an accepted trade-off.
+//
+// 17. Token endpoint does not re-validate client_id against the clients registry:
 //     The token endpoint checks client_id === authCode.clientId (string match against
 //     the value stored at authorize time) but does not look up the clients Map. This is
 //     intentional: auth codes live 5 minutes while client registrations live 24 hours,
@@ -114,6 +125,8 @@ const MAX_REDIRECT_URIS_PER_CLIENT = 10;
 const MAX_CLIENT_NAME_LENGTH = 256;
 const MAX_STATE_LENGTH = 2048;
 const GOOGLE_FETCH_TIMEOUT_MS = 15_000;
+const STATE_BYTES = 32; // randomBytes(STATE_BYTES).toString("hex") = STATE_BYTES * 2 hex chars
+const STATE_HEX_LENGTH = STATE_BYTES * 2;
 
 // --- In-memory stores (short-lived, stateless between restarts) ---
 
@@ -213,6 +226,8 @@ export function validateOAuthToken(token: string): string | null {
 
 /** Mount OAuth routes on the Express app. */
 export function mountOAuthRoutes(app: express.Express): void {
+  // Fail fast if OAuth is misconfigured — don't wait until first request
+  if (config.googleClientId) getGoogleOAuthClient();
   const issuer = config.publicUrl;
 
   // RFC 9728: Protected Resource Metadata
@@ -282,8 +297,8 @@ export function mountOAuthRoutes(app: express.Express): void {
 
     const clientId = randomUUID();
     const normalizedUris = redirect_uris.map(normalizeRedirectUri);
-    // Strip ASCII control chars, DEL, Unicode bidi overrides, zero-width chars, and BOM
-    const sanitizedName = client_name?.replace(/[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202f\u2060-\u2069\ufeff]/g, "") || undefined;
+    // Strip C0/C1 control chars, DEL, Unicode bidi overrides, zero-width chars, BOM, and lone surrogates
+    const sanitizedName = client_name?.replace(/[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202f\u2060-\u2069\ud800-\udfff\ufeff\ufffe\uffff]/g, "") || undefined;
     clients.set(clientId, { redirectUris: normalizedUris, name: sanitizedName, createdAt: Date.now() });
     console.log(`OAuth: registered client ${clientId} (${JSON.stringify(sanitizedName ?? "unnamed")})`);
 
@@ -319,8 +334,8 @@ export function mountOAuthRoutes(app: express.Express): void {
       res.status(400).json({ error: "invalid_client" });
       return;
     }
-    if (!redirect_uri) {
-      res.status(400).json({ error: "invalid_request", error_description: "redirect_uri is required" });
+    if (!redirect_uri || redirect_uri.length > 2048) {
+      res.status(400).json({ error: "invalid_request", error_description: "redirect_uri is required (max 2048 chars)" });
       return;
     }
     let normalizedRedirectUri: string;
@@ -334,9 +349,9 @@ export function mountOAuthRoutes(app: express.Express): void {
       res.status(400).json({ error: "invalid_request", error_description: "redirect_uri not registered" });
       return;
     }
-    // code_challenge must be base64url-safe unreserved chars per RFC 7636 §4.2
-    if (!code_challenge || !/^[A-Za-z0-9\-._~]{43,128}$/.test(code_challenge)) {
-      res.status(400).json({ error: "invalid_request", error_description: "PKCE code_challenge required (43-128 unreserved chars per RFC 7636)" });
+    // S256 code_challenge is always exactly 43 base64url chars (SHA-256 output)
+    if (!code_challenge || !/^[A-Za-z0-9\-._~]{43}$/.test(code_challenge)) {
+      res.status(400).json({ error: "invalid_request", error_description: "PKCE code_challenge must be exactly 43 unreserved chars (S256)" });
       return;
     }
     // Only S256 is supported; absent method defaults to S256 (see design decision #11)
@@ -354,7 +369,7 @@ export function mountOAuthRoutes(app: express.Express): void {
       return;
     }
 
-    const googleState = randomBytes(32).toString("hex");
+    const googleState = randomBytes(STATE_BYTES).toString("hex");
     pendingAuths.set(googleState, {
       clientId: client_id,
       redirectUri: normalizedRedirectUri,
@@ -390,7 +405,7 @@ export function mountOAuthRoutes(app: express.Express): void {
       return;
     }
 
-    if (!googleState || !googleCode || googleCode.length > 512 || googleState.length !== 64) {
+    if (!googleState || !googleCode || googleCode.length > 512 || googleState.length !== STATE_HEX_LENGTH) {
       // Consume state if present to prevent dangling entries
       if (googleState) pendingAuths.delete(googleState);
       res.status(400).json({ error: "invalid_request", error_description: "Missing code or state parameter" });

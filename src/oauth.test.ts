@@ -267,7 +267,7 @@ describe("mountOAuthRoutes", () => {
       );
       expect(res.status).toHaveBeenCalledWith(400);
       expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({ error_description: expect.stringContaining("PKCE code_challenge required") }),
+        expect.objectContaining({ error_description: expect.stringContaining("PKCE code_challenge") }),
       );
     });
 
