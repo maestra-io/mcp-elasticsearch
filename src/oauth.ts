@@ -3,7 +3,14 @@ import express from "express";
 import { OAuth2Client } from "google-auth-library";
 import { config } from "./config.js";
 
-const googleOAuthClient = new OAuth2Client(config.googleClientId);
+let _googleOAuthClient: OAuth2Client | undefined;
+function getGoogleOAuthClient(): OAuth2Client {
+  if (!_googleOAuthClient) {
+    if (!config.googleClientId) throw new Error("GOOGLE_CLIENT_ID is required for OAuth");
+    _googleOAuthClient = new OAuth2Client(config.googleClientId);
+  }
+  return _googleOAuthClient;
+}
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -147,7 +154,7 @@ export function mountOAuthRoutes(app: express.Express): void {
     }
 
     const clientId = randomUUID();
-    const normalizedUris = redirect_uris.map((u: string) => normalizeRedirectUri(u));
+    const normalizedUris = redirect_uris.map(normalizeRedirectUri);
     clients.set(clientId, { redirectUris: normalizedUris, name: client_name, createdAt: Date.now() });
     console.log(`OAuth: registered client ${clientId} (${client_name ?? "unnamed"})`);
 
@@ -269,14 +276,21 @@ export function mountOAuthRoutes(app: express.Express): void {
         return;
       }
 
-      const ticket = await googleOAuthClient.verifyIdToken({
-        idToken: tokenData.id_token,
-        audience: config.googleClientId,
-      });
+      let ticket;
+      try {
+        ticket = await getGoogleOAuthClient().verifyIdToken({
+          idToken: tokenData.id_token,
+          audience: config.googleClientId,
+        });
+      } catch (err) {
+        console.warn("OAuth: id_token verification failed", err);
+        res.status(400).json({ error: "invalid_request", error_description: "id_token verification failed" });
+        return;
+      }
       const payload = ticket.getPayload();
 
       if (!payload?.email || !payload.email.endsWith("@maestra.io") || payload.hd !== "maestra.io") {
-        console.warn(`OAuth: rejected login from ${payload?.email ?? "unknown"} (not @maestra.io)`);
+        console.warn(`OAuth: rejected login from ${payload?.email ?? "unknown"} (not from maestra.io domain)`);
         res.status(403).json({ error: "access_denied", error_description: "Access restricted to @maestra.io accounts" });
         return;
       }
