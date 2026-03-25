@@ -348,13 +348,13 @@ export function mountOAuthRoutes(app: express.Express): void {
       return;
     }
 
+    // Auth code is single-use per RFC 7636 §4.6 — delete before any PKCE checks
+    authCodes.delete(code);
+
     if (authCode.codeChallenge && !code_verifier) {
       res.status(400).json({ error: "invalid_grant", error_description: "code_verifier required (PKCE)" });
       return;
     }
-
-    // Auth code is single-use per RFC 7636 §4.6 — delete before PKCE check
-    authCodes.delete(code);
 
     if (code_verifier) {
       const expected = createHash("sha256").update(code_verifier).digest("base64url");

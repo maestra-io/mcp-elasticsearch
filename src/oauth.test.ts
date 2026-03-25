@@ -62,6 +62,15 @@ describe("normalizeRedirectUri", () => {
     expect(normalizeRedirectUri("https://example.com/cb?foo=bar#hash")).toBe("https://example.com/cb");
   });
 
+  it("resolves URL-encoded path traversals", () => {
+    expect(normalizeRedirectUri("https://example.com/a/%2e%2e/b")).toBe("https://example.com/b");
+  });
+
+  it("strips default ports (443 for https, 80 for http)", () => {
+    expect(normalizeRedirectUri("https://example.com:443/callback")).toBe("https://example.com/callback");
+    expect(normalizeRedirectUri("http://localhost:80/callback")).toBe("http://localhost/callback");
+  });
+
   it("throws on malformed input", () => {
     expect(() => normalizeRedirectUri("not-a-url")).toThrow();
   });
